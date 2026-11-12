@@ -181,6 +181,7 @@ every channel's live settings. The restore fixture puts the
 | `test_71_eq_bypass_fallback.py` | Disabling every band returns a boosted channel to within 1 dB of flat | Passes |
 | `test_72_eq_all_reset.py` | `eq_all_reset` (opcode 0xB0) | Skipped by design: `eq_all_reset` has no effect on this firmware and the client refuses it |
 | `test_80_mix_route_polarity.py` | `set_mix_route(..., True)` connects a crosspoint and `False` disconnects it | Passes |
+| `test_81_mix_sum.py` | Inputs A and B both routed to output 1 are summed at unity gain: adding the second route leaves each input's level unchanged, a shared tone rises by the coherent sum, and an inverted one cancels | Passes; +6.09 dB for A + B at 100 Hz (coherent sum predicted +6.09), A − B 32 dB down |
 | `test_90_dyneq_wire_format.py` | A Dynamic EQ whole-struct write reaches device storage (`read_group()` diff) | Passes |
 | `test_91_dyneq_audible_effect.py` | A Dynamic EQ boost is audible (more than 10 dB) on all three bands | Passes. Power-cycle first if it reads flat |
 | `test_a0_dynamics_wire_format.py` | Output compressor, limiter and expander writes reach device storage | Passes. The input-compressor case is skipped by design: input compressor has no effect on this firmware and the client refuses it |

@@ -976,6 +976,17 @@ possible source, took a 1 kHz tone from the noise floor (~-109 dBFS) to
 ~-38 dBFS exactly when `set_mix_route(..., True)` was sent, and back when
 set to `False`. So 1 means connected.
 
+**Confirmed on hardware** (`hardware_test/test_81_mix_sum.py`): several
+inputs routed to one output are summed sample by sample at unity gain, with
+no scaling by route count. With A and B both routed to output 1, each input
+alone measured within 0.01 dB of its single-route level; the same 100 Hz
+tone on both rose 6.09 dB (the coherent sum of the two paths predicted
+6.09 dB); and with B inverted the tone fell 32 dB. A stereo-to-mono sub feed
+is therefore just two crosspoints, but correlated bass gains up to 6 dB
+with no crosspoint level to trim it. Whether the summing stage itself can
+clip (rather than only the output) was not tested; the tone stayed far
+below full scale.
+
 The 4 × 8 bus count is confirmed (32 snapshot entries, and channel copy
 works with 4 inputs and 8 outputs); not every crosspoint has been
 individually exercised. The client validates `in_index` 0-3 and
