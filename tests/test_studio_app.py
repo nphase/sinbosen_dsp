@@ -634,7 +634,7 @@ def test_an_unknown_current_slot_flags_none(store: StudioStore) -> None:
 
 
 def test_saving_in_the_demo_makes_the_slot_current(client: TestClient) -> None:
-    state = post(client, "/api/programs/save", slot=2, apply_first=False)
+    state = post(client, "/api/programs/save", slot=2, name="user3", apply_first=False)
     assert state["saved"] == {"slot": 2, "name": "user3"}
     assert state["result"] is None
     assert state["status"]["demo"] is True
@@ -647,7 +647,7 @@ def test_saving_to_a_connected_unit(store: StudioStore) -> None:
     device.client.current_program = 0
     device.client.save_program.side_effect = lambda slot: setattr(device.client, "current_program", slot)
     with connected(store, device) as client:
-        state = post(client, "/api/programs/save", slot=3)
+        state = post(client, "/api/programs/save", slot=3, name="User4")
         assert client.get("/api/programs").json()["current"] == 3
     device.client.save_program.assert_called_once_with(3)
     assert state["saved"] == {"slot": 3, "name": "User4"}
@@ -655,7 +655,7 @@ def test_saving_to_a_connected_unit(store: StudioStore) -> None:
 
 def test_saving_with_pending_edits_and_no_apply_first_is_refused(client: TestClient) -> None:
     post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
-    response = client.post("/api/programs/save", json={"slot": 0, "apply_first": False})
+    response = client.post("/api/programs/save", json={"slot": 0, "name": "user1", "apply_first": False})
     assert response.status_code == 400
     assert "pending" in response.json()["error"]
 
@@ -670,7 +670,7 @@ def test_apply_first_applies_then_saves(store: StudioStore) -> None:
     device.client.save_program.side_effect = lambda slot: order.append("save")
     with connected(store, device) as client:
         post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
-        state = post(client, "/api/programs/save", slot=1, apply_first=True)
+        state = post(client, "/api/programs/save", slot=1, name="User2", apply_first=True)
     assert order == ["apply", "save"]
     assert state["result"]["ok"] is True
     assert state["saved"] == {"slot": 1, "name": "User2"}
@@ -683,7 +683,7 @@ def test_apply_first_saves_nothing_when_apply_reports_a_conflict(store: StudioSt
     with connected(store, device) as client:
         post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
         device.settings = replace_control(device.settings, ControlKey(True, 0, "delay"), 7.0)
-        state = post(client, "/api/programs/save", slot=1, apply_first=True)
+        state = post(client, "/api/programs/save", slot=1, name="User2", apply_first=True)
     device.client.save_program.assert_not_called()
     assert state["saved"] is None
     assert state["result"]["ok"] is False
@@ -696,7 +696,7 @@ def test_a_locked_unit_refuses_to_save(store: StudioStore) -> None:
     device.client.get_program_names.return_value = NAMES
     with connected(store, device) as client:
         device.client.read_lock_state.return_value = LockState(True, "1234")
-        response = client.post("/api/programs/save", json={"slot": 0})
+        response = client.post("/api/programs/save", json={"slot": 0, "name": "User1"})
     assert response.status_code == 400
     assert "locked" in response.json()["error"]
     device.client.save_program.assert_not_called()
@@ -704,13 +704,13 @@ def test_a_locked_unit_refuses_to_save(store: StudioStore) -> None:
 
 @pytest.mark.parametrize("slot", [-1, 30, 1.0, "1", True, None])
 def test_an_invalid_slot_is_400(client: TestClient, slot: Any) -> None:
-    response = client.post("/api/programs/save", json={"slot": slot})
+    response = client.post("/api/programs/save", json={"slot": slot, "name": "user1"})
     assert response.status_code == 400
     assert "error" in response.json()
 
 
 def test_apply_first_must_be_a_bool(client: TestClient) -> None:
-    assert client.post("/api/programs/save", json={"slot": 0, "apply_first": "yes"}).status_code == 400
+    assert client.post("/api/programs/save", json={"slot": 0, "name": "user1", "apply_first": "yes"}).status_code == 400
 
 
 def test_programs_and_saving_while_disconnected_are_503(store: StudioStore) -> None:
@@ -721,7 +721,7 @@ def test_programs_and_saving_while_disconnected_are_503(store: StudioStore) -> N
         post(client, "/api/connect", address="usb")
         service.close()
         assert client.get("/api/programs").status_code == 503
-        response = client.post("/api/programs/save", json={"slot": 0})
+        response = client.post("/api/programs/save", json={"slot": 0, "name": "User1"})
         assert response.status_code == 503
         assert "error" in response.json()
     device.client.save_program.assert_not_called()
@@ -731,3 +731,43 @@ def test_programs_is_local_only(client: TestClient) -> None:
     assert client.get("/api/programs", headers={"host": "evil.example"}).status_code == 400
     assert client.post("/api/programs/save", content=b'{"slot": 0}',
                        headers={"content-type": "text/plain"}).status_code == 415
+
+
+def test_the_save_names_the_slot_and_is_refused_when_the_unit_has_another_name(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    with connected(store, device) as client:
+        post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+        response = client.post("/api/programs/save", json={"slot": 2, "name": "user3", "apply_first": True})
+        assert response.status_code == 409
+        assert response.json() == {"error": "slot 3 is now named 'User3' on the unit, not 'user3'; nothing was saved"}
+        assert client.get("/api/state").json()["status"]["pending_count"] == 1
+    device.client.save_program.assert_not_called()
+    device.client.set_delay.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [{"slot": 0}, {"slot": 0, "name": None}, {"slot": 0, "name": 3}])
+def test_the_save_must_carry_the_slot_name(client: TestClient, body: dict[str, Any]) -> None:
+    response = client.post("/api/programs/save", json=body)
+    assert response.status_code == 400
+    assert "name" in response.json()["error"]
+
+
+def test_a_save_that_fails_after_apply_first_reports_the_apply_and_the_failure(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    device.client.set_delay.side_effect = lambda channel, ms, **kwargs: setattr(
+        device, "settings", replace_control(device.settings, ControlKey(True, channel, "delay"), ms))
+    device.client.save_program.side_effect = OSError("usb write failed")
+    with connected(store, device) as client:
+        post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+        state = post(client, "/api/programs/save", slot=1, name="User2", apply_first=True)
+    assert state["saved"] is None
+    assert state["result"]["ok"] is True
+    assert state["save_error"] == "Your edits were applied, but saving to slot 2 failed: usb write failed"
+    assert state["status"]["pending_count"] == 0
+    assert channel(state, "out:0")["delay_ms"] == 1.0
+
+
+def test_a_plain_save_has_no_save_error(client: TestClient) -> None:
+    assert post(client, "/api/programs/save", slot=0, name="user1")["save_error"] is None

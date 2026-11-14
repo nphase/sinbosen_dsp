@@ -5,6 +5,7 @@
 
 import { ApiError, getPrograms } from "./api.js";
 
+const ARM_MS = 400;  // the confirm button stays disabled this long, so the click or key that opened the step misses it
 const slotName = (number, name) => `slot ${number} (${name || "empty name"})`;
 const edits = (count) => `${count} unapplied ${count === 1 ? "edit" : "edits"}`;
 
@@ -25,11 +26,22 @@ export function createSavePopover({ ui, state, h, act, cls, below, send, render 
     });
   }
 
+  function confirmStep(menu) {
+    menu.confirming = true;
+    menu.armedAt = performance.now() + ARM_MS;
+    ui.focusMenu = true;
+    setTimeout(render, ARM_MS + 20);
+  }
+
   async function save(menu, slot) {
+    if (performance.now() < menu.armedAt) return;
     menu.saving = true;
-    const data = await send("/api/programs/save", { slot: slot.index, apply_first: state().status.pending_count > 0 });
+    ui.notice = null;
+    const data = await send("/api/programs/save",
+      { slot: slot.index, name: slot.name, apply_first: state().status.pending_count > 0 });
     // A refusal is already in the error bar, and an Apply that was not ok has put its result there.
     if (ui.menu === menu) ui.menu = null;
+    if (data?.save_error) ui.errors.push(data.save_error);
     if (data?.saved) {
       ui.notice = { text: `Saved to ${slotName(data.saved.slot + 1, data.saved.name)}.`, message: data.status.message };
     }
@@ -55,20 +67,26 @@ export function createSavePopover({ ui, state, h, act, cls, below, send, render 
     const chosen = menu.programs?.slots[menu.slot] ?? null;
     const named = chosen && slotName(chosen.number, chosen.name);
     const items = [h("div", { class: "popover-title" }, "Save to program slot")];
-    if (pending) {
+    const confirming = menu.programs && menu.confirming && chosen;
+    if (pending && !confirming) {
       items.push(h("div", { class: "note" },
         `You have ${edits(pending)}. The unit saves what is live on it, not your drafts.`));
     }
     if (!menu.programs) {
       items.push(h("div", { class: "muted" }, "Reading the slots…"));
-    } else if (menu.confirming && chosen) {
+    } else if (confirming) {
+      // With drafts, the step says Apply runs first: what is saved is then the drafts, not only what is live now.
+      const text = pending
+        ? `Your ${edits(pending)} will be applied to the unit first. Then ${named} will be replaced with the unit's `
+          + "live settings. This cannot be undone."
+        : `${named[0].toUpperCase()}${named.slice(1)} will be replaced with the unit's current live settings. `
+          + "This cannot be undone.";
       items.push(
-        h("div", { class: "confirm", role: "alert" },
-          `${named[0].toUpperCase()}${named.slice(1)} will be replaced with the unit's current live settings. `
-          + "This cannot be undone.", status.live ? " Live tuning will be switched off." : null),
+        h("div", { class: "confirm", role: "alert" }, text, status.live ? " Live tuning will be switched off." : null),
         h("div", { class: "row" },
-          h("button", { type: "button", class: "button danger", disabled: menu.saving,
-            "data-action": act(() => save(menu, chosen)) }, menu.saving ? "Saving…" : "Overwrite"),
+          h("button", { type: "button", class: "button danger",
+            disabled: menu.saving || performance.now() < menu.armedAt, "data-action": act(() => save(menu, chosen)) },
+          menu.saving ? "Saving…" : pending ? "Apply and overwrite" : "Overwrite"),
           h("button", { type: "button", class: "button", disabled: menu.saving, "data-autofocus": true,
             "data-action": act(() => { menu.confirming = false; ui.focusMenu = true; }) }, "Cancel")));
     } else {
@@ -77,7 +95,7 @@ export function createSavePopover({ ui, state, h, act, cls, below, send, render 
           menu.programs.slots.map((slot) => slotRow(menu, slot))),
         h("div", { class: "row" },
           h("button", { type: "button", class: "button primary", disabled: !chosen,
-            "data-action": act(() => { menu.confirming = true; ui.focusMenu = true; }) },
+            "data-action": act(() => confirmStep(menu)) },
           chosen ? `${pending ? "Apply and overwrite" : "Overwrite"} ${named}` : "Overwrite slot"),
           h("button", { type: "button", class: "button", "data-action": act(() => {
             ui.menu = null;

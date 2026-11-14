@@ -89,16 +89,24 @@ keep a tuning, save it to a program slot:
    slot 3 (user3)**.
 3. The popover asks again: "Slot 3 (user3) will be replaced with the unit's
    current live settings. This cannot be undone." **Cancel** has the focus, so
-   Enter does not confirm; press **Overwrite** to save. Escape closes the
-   popover without saving.
+   Enter does not confirm; press **Overwrite** to save (it can be pressed a
+   moment after the step appears, so the click that opened it cannot confirm
+   it too). Escape closes the popover without saving.
 
 After a save the popover closes, the status line says "Saved to slot 3
 (user3).", and that slot is the unit's current one, the one it starts in.
 
 The unit saves what is live on it, not your drafts. With unapplied edits the
-popover says so and the button reads **Apply and overwrite slot 3 (user3)**: it
-runs Apply first and saves only if Apply reports no errors or conflicts and the
-readback verified; otherwise nothing is saved and Apply's result is shown.
+popover says so and the button reads **Apply and overwrite slot 3 (user3)**. The
+second step then says "Your 3 unapplied edits will be applied to the unit first.
+Then slot 3 (user3) will be replaced with the unit's live settings. This cannot
+be undone." and its button is **Apply and overwrite**. It runs Apply first and
+saves only if Apply reports no errors or conflicts and the readback verified;
+otherwise nothing is saved and Apply's result is shown. If Apply wrote your
+edits but the save then failed, the error bar says "Your edits were applied, but
+saving to slot 3 failed: ..." and the edits are no longer counted as unapplied.
+If the slot's name on the unit changed since the popover read it, nothing is
+saved and the error bar says so.
 Saving switches Live off, and the confirmation says so when Live is on. A
 locked or disconnected unit, or a failed write or readback, is reported in the
 error bar, and nothing is reported as saved. In the offline demo the slots are

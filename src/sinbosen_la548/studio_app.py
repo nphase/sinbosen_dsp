@@ -68,6 +68,10 @@ def _number(value: object) -> float:
     raise ValueError("value must be a finite number")
 
 
+class SlotRenamed(Exception):
+    """The slot the user confirmed has another name on the unit now: answered with 409, nothing saved."""
+
+
 def _parse_channel(text: object) -> tuple[bool, int]:
     side, _, number = text.partition(":") if isinstance(text, str) else ("", "", "")
     if side not in ("in", "out") or not number.isascii() or not number.isdigit():
@@ -171,21 +175,34 @@ class _Studio:
         return {"slots": [{"index": i, "number": i + 1, "name": name, "current": i == slots.current}
                           for i, name in enumerate(slots.names)], "current": slots.current}
 
-    def save(self, body: dict[str, Any]) -> tuple[ApplyResult | None, dict[str, Any] | None]:
-        """Save the unit's live settings to a slot. With `apply_first`, Apply runs first and the save happens only
-        when it reports ok; otherwise nothing is saved and its result is returned."""
+    def save(self, body: dict[str, Any]) -> tuple[ApplyResult | None, dict[str, Any] | None, str | None]:
+        """Save the unit's live settings to the slot the user confirmed by number and `name`; a slot now named
+        otherwise on the unit is refused. With `apply_first`, Apply runs first and the save happens only when it
+        reports ok; otherwise nothing is saved and its result is returned. A save that fails after Apply wrote
+        something is returned as the third value, so the page learns of the Apply too."""
         slot = _index(body, "slot")
         if not 0 <= slot < PROGRAM_SLOTS:
             raise ValueError(f"slot must be 0-{PROGRAM_SLOTS - 1}")
+        name = _text(body, "name")
         apply_first = _flag(body, "apply_first") if "apply_first" in body else False
         names = self.service.programs(self.token).names
+        if names[slot] != name:
+            raise SlotRenamed(f"slot {slot + 1} is now named {names[slot]!r} on the unit, not {name!r}; "
+                              "nothing was saved")
         result = None
         if apply_first:
             result = self.apply(body)
             if not _result_json(result)["ok"]:
-                return result, None
-        self.service.operation(self.token, "save", slot=slot)
-        return result, {"slot": slot, "name": names[slot]}
+                return result, None, None
+        try:
+            self.service.operation(self.token, "save", slot=slot)
+        except Exception as error:
+            if result is None or not result.applied:
+                raise
+            if _status_for(error) is None:
+                LOG.exception("Unhandled error saving after Apply")
+            return result, None, f"Your edits were applied, but saving to slot {slot + 1} failed: {error}"
+        return result, {"slot": slot, "name": names[slot]}, None
 
     # View
 
@@ -364,6 +381,8 @@ class _LocalOnly:
 
 
 def _status_for(error: Exception) -> int | None:
+    if isinstance(error, SlotRenamed):
+        return 409
     if isinstance(error, (ValueError, PermissionError, OverflowError)):
         return 400
     if isinstance(error, (ConnectionError, TimeoutError, OSError, RuntimeError)):
@@ -438,8 +457,9 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
 
         def save() -> dict[str, Any]:
             with studio.lock:
-                result, saved = studio.save(body)
-                return {**studio.state(), "result": None if result is None else _result_json(result), "saved": saved}
+                result, saved, save_error = studio.save(body)
+                return {**studio.state(), "result": None if result is None else _result_json(result), "saved": saved,
+                        "save_error": save_error}
 
         return await run_in_threadpool(respond, save)
 

@@ -950,7 +950,7 @@ def test_a_sideways_drag_keeps_an_unresolved_crossover_slope(connected_studio: S
 def _open_save(studio: Studio) -> Any:
     studio.page.get_by_role("button", name="Save", exact=True).click()
     popover = studio.page.get_by_role("dialog", name="Save to program slot")
-    popover.get_by_role("button", name="Slot 30, user30").wait_for()
+    popover.get_by_role("button", name=re.compile("^Slot 30, ")).wait_for()
     return popover
 
 
@@ -989,7 +989,7 @@ def test_saving_asks_again_with_cancel_focused_and_enter_does_not_save(studio: S
     with page.expect_response("**/api/programs/save"):
         popover.get_by_role("button", name="Overwrite", exact=True).click()
     popover.wait_for(state="detached")
-    assert json.loads(saves[0]) == {"slot": 2, "apply_first": False}
+    assert json.loads(saves[0]) == {"slot": 2, "name": "user3", "apply_first": False}
     page.locator("#hint").get_by_text("Saved to slot 3 (user3).").wait_for()
     assert page.locator("#errors").inner_text() == ""
     popover = _open_save(studio)
@@ -1005,8 +1005,13 @@ def test_saving_with_an_unapplied_edit_applies_first(studio: Studio) -> None:
     popover = _open_save(studio)
     popover.get_by_text("You have 1 unapplied edit. The unit saves what is live on it, not your drafts.").wait_for()
     popover.get_by_role("button", name="Apply and overwrite slot 1 (user1)").click()
-    with page.expect_response("**/api/programs/save"):
-        popover.get_by_role("button", name="Overwrite", exact=True).click()
+    popover.get_by_text("Your 1 unapplied edit will be applied to the unit first. Then slot 1 (user1) will be "
+                        "replaced with the unit's live settings. This cannot be undone.", exact=True).wait_for()
+    assert popover.get_by_text("not your drafts", exact=False).count() == 0
+    assert popover.get_by_role("button", name="Overwrite", exact=True).count() == 0
+    with page.expect_response("**/api/programs/save") as response:
+        popover.get_by_role("button", name="Apply and overwrite", exact=True).click()
+    assert json.loads(response.value.request.post_data or "{}") == {"slot": 0, "name": "user1", "apply_first": True}
     page.locator("#hint").get_by_text("Saved to slot 1 (user1).").wait_for()
     assert studio.unapplied().inner_text() == ""
     assert studio.field("Out 5 delay in ms").input_value() == "1.50"
@@ -1030,9 +1035,14 @@ def test_saving_says_live_is_switched_off_and_a_locked_unit_reaches_the_error_ba
     unit.client.get_program_names.return_value = tuple(f"User{n}" for n in range(1, 30)) + ("",)
     unit.client.current_program = 4
     page = connected_studio.page
+    popover = _open_save(connected_studio)
+    popover.get_by_role("button", name="Overwrite slot 1 (User1)").wait_for(state="detached")
+    popover.get_by_role("button", name="Overwrite slot 5 (User5)").click()
+    with page.expect_response("**/api/programs/save"):
+        popover.get_by_role("button", name="Overwrite", exact=True).click()
+    page.locator("#hint").get_by_text("Saved to slot 5 (User5).").wait_for()
     page.get_by_role("checkbox", name="Live").check()
-    popover = connected_studio.page.get_by_role("button", name="Save", exact=True).click()
-    popover = page.get_by_role("dialog", name="Save to program slot")
+    page.get_by_role("button", name="Save", exact=True).click()
     assert popover.get_by_role("button", name="Slot 5, User5, current").get_attribute("aria-pressed") == "true"
     assert popover.get_by_role("button", name="Slot 30, empty name").locator(".slot-name.empty").inner_text() \
         == "empty name"
@@ -1042,6 +1052,49 @@ def test_saving_says_live_is_switched_off_and_a_locked_unit_reaches_the_error_ba
     with page.expect_response("**/api/programs/save"):
         popover.get_by_role("button", name="Overwrite", exact=True).click()
     page.locator("#errors").get_by_text("device is locked; writes are disabled").wait_for()
-    assert page.locator("#hint").get_by_text("Saved to").count() == 0
-    unit.client.save_program.assert_not_called()
+    assert page.locator("#hint").get_by_text("Saved to").count() == 0  # the earlier success line is gone
+    unit.client.save_program.assert_called_once_with(4)
     connected_studio.errors[:] = [e for e in connected_studio.errors if "status of 400" not in e]
+
+
+def test_the_click_that_opens_the_confirmation_cannot_confirm_it(studio: Studio) -> None:
+    saves = _saves(studio)
+    page = studio.page
+    popover = _open_save(studio)
+    popover.get_by_role("button", name="Overwrite slot 1 (user1)").dblclick()
+    page.wait_for_timeout(500)
+    assert saves == []  # the second click lands outside the shorter confirmation step and closes it
+    # A second activation straight after the step opens, by pointer or by key, is ignored too.
+    if popover.count():
+        page.keyboard.press("Escape")
+    popover = _open_save(studio)
+    page.evaluate("""() => {
+        document.querySelector('#overlay .button.primary').click();
+        const confirm = [...document.querySelectorAll('#overlay .button.danger')][0];
+        confirm.click();
+        confirm.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    }""")
+    page.wait_for_timeout(500)
+    assert saves == []
+    with page.expect_response("**/api/programs/save"):
+        popover.get_by_role("button", name="Overwrite", exact=True).click()
+    page.locator("#hint").get_by_text("Saved to slot 1 (user1).").wait_for()
+
+
+def test_a_save_that_fails_after_its_apply_says_the_edits_were_applied(connected_studio: Studio,
+                                                                       unit: FakeUnit) -> None:
+    unit.client.get_program_names.return_value = tuple(f"User{n}" for n in range(1, 31))
+    unit.client.current_program = 0
+    unit.client.save_program.side_effect = OSError("usb write failed")
+    page = connected_studio.page
+    with page.expect_response("**/api/edit"):
+        connected_studio.field("Out 5 delay in ms").fill("1.5")
+        connected_studio.field("Out 5 delay in ms").press("Enter")
+    popover = _open_save(connected_studio)
+    popover.get_by_role("button", name="Apply and overwrite slot 1 (User1)").click()
+    with page.expect_response("**/api/programs/save"):
+        popover.get_by_role("button", name="Apply and overwrite", exact=True).click()
+    page.locator("#errors").get_by_text(
+        "Your edits were applied, but saving to slot 1 failed: usb write failed").wait_for()
+    assert connected_studio.unapplied().inner_text() == ""
+    assert page.locator("#hint").get_by_text("Saved to").count() == 0
