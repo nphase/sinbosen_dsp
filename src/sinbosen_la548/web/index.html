@@ -2,9 +2,25 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Sinbosen Studio</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSP Studio</title>
+<link rel="preload" href="static/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="static/studio.css">
+<script type="module" src="static/studio.js"></script>
 </head>
 <body>
-<div id="app"></div>
+<div class="app">
+<header id="topbar" class="topbar"></header>
+<div id="errors" class="errors" role="alert"></div>
+<main class="main">
+<section class="strips" aria-label="Channels"><div id="strips" class="strip-grid"></div></section>
+<div id="hint" class="hint"></div>
+<section id="selected-bar" class="selected-bar" aria-label="Selected channel"></section>
+<!-- The response plot is drawn here by plot.js (phase 1, task 7); studio.js never touches this element. -->
+<section id="plot" class="plot" aria-label="Response plot"></section>
+<section id="cards" class="cards" aria-label="Filters"></section>
+</main>
+</div>
+<div id="overlay"></div>
 </body>
 </html>

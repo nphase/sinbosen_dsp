@@ -357,8 +357,9 @@ def test_root_serves_the_page_and_static_files(client: TestClient) -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    assert 'id="app"' in response.text
+    assert 'src="static/studio.js"' in response.text
     assert client.get("/static/index.html").status_code == 200
+    assert client.get("/static/fonts/InterVariable.woff2").headers["content-type"] == "font/woff2"
     assert client.get("/static/nope.js").status_code == 404
 
 
