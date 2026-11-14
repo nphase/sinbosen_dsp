@@ -609,6 +609,7 @@ def test_typing_survives_polls(studio: Studio) -> None:
 def test_hint_says_filters_wait_for_apply_while_live_is_off(studio: Studio) -> None:
     hint = studio.page.locator("#hint")
     assert "Filters and delay wait for Apply." in hint.inner_text()
+    assert "Gain is sent when you press Enter; polarity and mute take effect immediately." in hint.inner_text()
 
 
 def test_repeated_errors_are_listed_once(studio: Studio) -> None:

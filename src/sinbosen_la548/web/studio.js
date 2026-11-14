@@ -7,7 +7,7 @@ import { createHandleGestures, targetOf } from "./handles.js";
 import { createPlot } from "./plot.js";
 
 const POLL_MS = 1000;
-const HINT = "Gain, polarity and mute take effect immediately.";
+const HINT = "Gain is sent when you press Enter; polarity and mute take effect immediately.";
 const HINT_DRAFT = "Filters and delay wait for Apply.";
 const HINT_LIVE = "Filters and delay are sent as you edit.";
 const SECTION_LABELS = { crossover: "Crossover", eq: "EQ", delay: "Delay", limiter: "Limiter" };
