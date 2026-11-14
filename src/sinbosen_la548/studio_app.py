@@ -7,20 +7,24 @@ import contextlib
 import logging
 import math
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import Headers
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import links
-from .service import IMMEDIATE_BLOCKS, ControlKey, DSPService, demo_settings
+from .service import IMMEDIATE_BLOCKS, ApplyResult, ControlKey, DSPService, demo_settings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import band_in_use, build_state
 from .tuning import TuningController
@@ -30,7 +34,7 @@ WEB_DIR = Path(__file__).with_name("web")
 DEMO_DEVICE_KEY = "demo"
 FLUSH_INTERVAL_S = 0.25
 
-Handler = Callable[[dict[str, Any]], None]
+Handler = Callable[[dict[str, Any]], ApplyResult | None]
 
 
 def _text(body: dict[str, Any], name: str) -> str:
@@ -102,14 +106,16 @@ class _Studio:
     def _save(self, notes: DeviceNotes) -> None:
         self.store.save(self.device_key, notes)
 
-    def _stage_and_write(self, edits: dict[ControlKey, object]) -> None:
-        """Stage the edits that wait for Apply and write gain, polarity and mute straight away."""
+    def _stage_and_write(self, edits: dict[ControlKey, object]) -> ApplyResult | None:
+        """Stage the edits that wait for Apply and write gain, polarity and mute straight away.
+
+        Returns the result of the immediate write, or None when there was none.
+        """
         staged = {key: value for key, value in edits.items() if key.block not in IMMEDIATE_BLOCKS}
         immediate = {key: value for key, value in edits.items() if key.block in IMMEDIATE_BLOCKS}
         if staged:
             self.service.stage_many(self.token, staged)
-        if immediate:
-            self.service.write_now(self.token, immediate)
+        return self.service.write_now(self.token, immediate) if immediate else None
 
     def _group(self, letter: str) -> LinkGroup:
         group = next((g for g in self.store.load(self.device_key).links if g.letter == letter), None)
@@ -135,9 +141,10 @@ class _Studio:
     def refresh(self, body: dict[str, Any]) -> None:
         self.service.refresh(self.token)
 
-    def apply(self, body: dict[str, Any]) -> None:
-        self.service.apply(self.token)
+    def apply(self, body: dict[str, Any]) -> ApplyResult | None:
+        result = self.service.apply(self.token)
         self.live_errors = ""
+        return result
 
     def revert(self, body: dict[str, Any]) -> None:
         self.service.revert(self.token)
@@ -172,12 +179,12 @@ class _Studio:
 
     # Edits
 
-    def now(self, body: dict[str, Any]) -> None:
+    def now(self, body: dict[str, Any]) -> ApplyResult | None:
         output, channel = self._channel(body)
         key = ControlKey(output, channel, _text(body, "block"))
         draft = self.service.view(self.token).draft
-        self.service.write_now(self.token, links.expand(self.store.load(self.device_key).links, draft,
-                                                        {key: body.get("value")}))
+        return self.service.write_now(self.token, links.expand(self.store.load(self.device_key).links, draft,
+                                                               {key: body.get("value")}))
 
     def edit(self, body: dict[str, Any]) -> None:
         output, channel = self._channel(body)
@@ -239,20 +246,22 @@ class _Studio:
         notes = self.store.load(self.device_key)
         self._save(replace(notes, nicknames={**notes.nicknames, (output, channel): _text(body, "name")}))
 
-    def link(self, body: dict[str, Any]) -> None:
+    def link(self, body: dict[str, Any]) -> ApplyResult | None:
         output, channel = self._channel(body)
         letter = body.get("letter")
         if letter is not None and not isinstance(letter, str):
             raise ValueError("letter must be a group letter or null")
         notes = self.store.load(self.device_key)
         groups = links.with_member(notes.links, output, channel, letter)
+        result = None
         if letter is not None:
             # The group as it was before joining: the joiner must not be taken as its source.
             before = next(g for g in notes.links if g.letter == letter)
             if channel not in before.members:
                 draft = self.service.view(self.token).draft
-                self._stage_and_write(links.join(before, channel, draft))
+                result = self._stage_and_write(links.join(before, channel, draft))
         self._save(replace(notes, links=groups))
+        return result
 
     def unlink(self, body: dict[str, Any]) -> None:
         output, channel = self._channel(body)
@@ -267,7 +276,7 @@ class _Studio:
         self._save(replace(notes, links=links.with_sections(notes.links, _text(body, "letter"),
                                                             frozenset(sections))))
 
-    def link_sync(self, body: dict[str, Any]) -> None:
+    def link_sync(self, body: dict[str, Any]) -> ApplyResult | None:
         group = self._group(_text(body, "letter"))
         output, source = self._channel({"id": body.get("from")})
         if output != group.output or source not in group.members:
@@ -277,7 +286,48 @@ class _Studio:
         edits: dict[ControlKey, object] = {}
         for member in ordered.members[1:]:
             edits.update(links.join(ordered, member, draft))
-        self._stage_and_write(edits)
+        return self._stage_and_write(edits)
+
+
+def _result_json(result: ApplyResult) -> dict[str, Any]:
+    return {"ok": not result.errors and not result.conflicts and result.verified, "errors": list(result.errors),
+            "conflicts": [key.label for key in result.conflicts], "pending": [key.label for key in result.pending],
+            "verified": result.verified}
+
+
+def _hostname(host: str) -> str:
+    """The host part of a Host header value, keeping the brackets of an IPv6 literal."""
+    host = host.strip().lower()
+    return host[:host.index("]") + 1] if host.startswith("[") and "]" in host else host.partition(":")[0]
+
+
+class _LocalOnly:
+    """Refuses requests a page on another site could send: foreign Host or Origin, and non-JSON POSTs to the API."""
+
+    def __init__(self, app: ASGIApp, allowed_hosts: Sequence[str]) -> None:
+        self.app = app
+        extra = (f"[{h}]" if ":" in h and not h.startswith("[") else h for h in allowed_hosts)
+        self.allowed = {"127.0.0.1", "localhost", "[::1]", *(h.strip().lower() for h in extra)}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        host = headers.get("host", "")
+        origin = headers.get("origin")
+        refusal: tuple[int, str] | None = None
+        if _hostname(host) not in self.allowed:
+            refusal = 400, "unexpected Host header"
+        elif origin is not None and urlsplit(origin).netloc.lower() != host.strip().lower():
+            refusal = 403, "cross-origin requests are not allowed"
+        elif scope["method"] == "POST" and scope["path"].startswith("/api/"):
+            if headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
+                refusal = 415, "requests must be sent as application/json"
+        if refusal is not None:
+            await JSONResponse({"error": refusal[1]}, status_code=refusal[0])(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 def _status_for(error: Exception) -> int | None:
@@ -288,8 +338,12 @@ def _status_for(error: Exception) -> int | None:
     return None
 
 
-def create_studio_app(service: DSPService | None = None, *, store: StudioStore | None = None) -> Starlette:
-    """The studio API and page. `service` defaults to an offline demo; it is closed when the app shuts down."""
+def create_studio_app(service: DSPService | None = None, *, store: StudioStore | None = None,
+                      allowed_hosts: Sequence[str] = ()) -> Starlette:
+    """The studio API and page. `service` defaults to an offline demo; it is closed when the app shuts down.
+
+    Only loopback Host headers are served, plus `allowed_hosts`; no CORS headers are ever sent.
+    """""
     studio = _Studio(service or DSPService(demo_settings()), store or StudioStore(default_path()))
 
     def respond(call: Callable[[], dict[str, Any]]) -> Response:
@@ -304,8 +358,8 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
 
     def run(handler: Handler, body: dict[str, Any]) -> dict[str, Any]:
         with studio.lock:
-            handler(body)
-            return studio.state()
+            result = handler(body)
+            return {**studio.state(), "result": None if result is None else _result_json(result)}
 
     async def read_body(request: Request) -> dict[str, Any]:
         raw = await request.body()
@@ -378,6 +432,6 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
     ]
     if WEB_DIR.is_dir():
         routes += [Route("/", index, methods=["GET"]), Mount("/static", StaticFiles(directory=WEB_DIR))]
-    app = Starlette(routes=routes, lifespan=lifespan)
+    app = Starlette(routes=routes, lifespan=lifespan, middleware=[Middleware(_LocalOnly, allowed_hosts=allowed_hosts)])
     app.state.service = studio.service
     return app

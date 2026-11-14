@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
 import time
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -31,10 +33,17 @@ def store(tmp_path: Path) -> StudioStore:
     return StudioStore(tmp_path / "studio.json")
 
 
+def make_client(service: DSPService, store: StudioStore, **options: Any) -> TestClient:
+    return TestClient(create_studio_app(service, store=store, **options), base_url="http://127.0.0.1")
+
+
 @pytest.fixture
 def client(store: StudioStore) -> Any:
-    with TestClient(create_studio_app(DSPService(demo_settings()), store=store)) as test_client:
+    with make_client(DSPService(demo_settings()), store) as test_client:
         yield test_client
+
+
+JSON = {"content-type": "application/json"}
 
 
 def post(client: TestClient, path: str, **body: Any) -> Any:
@@ -147,7 +156,7 @@ def test_link_across_input_and_output_is_400(client: TestClient) -> None:
 def test_link_unknown_letter_and_missing_fields_are_400(client: TestClient) -> None:
     assert client.post("/api/link", json={"id": "out:0", "letter": "Q"}).status_code == 400
     assert client.post("/api/link", json={"letter": None}).status_code == 400
-    assert client.post("/api/link", content=b"not json").status_code == 400
+    assert client.post("/api/link", content=b"not json", headers=JSON).status_code == 400
 
 
 def test_creating_a_group_adds_a_one_member_group(client: TestClient) -> None:
@@ -241,11 +250,11 @@ def test_band_add_with_no_free_slot_and_bad_remove_are_400(client: TestClient) -
 
 
 def test_nickname_persists_across_a_new_app_instance(store: StudioStore) -> None:
-    with TestClient(create_studio_app(DSPService(demo_settings()), store=store)) as first:
+    with make_client(DSPService(demo_settings()), store) as first:
         state = post(first, "/api/nickname", id="out:2", name="  Tweeter ")
         assert channel(state, "out:2")["nickname"] == "Tweeter"
     assert "demo" in json.loads(store.path.read_text())["devices"]
-    with TestClient(create_studio_app(DSPService(demo_settings()), store=StudioStore(store.path))) as second:
+    with make_client(DSPService(demo_settings()), StudioStore(store.path)) as second:
         assert channel(second.get("/api/state").json(), "out:2")["nickname"] == "Tweeter"
         state = post(second, "/api/nickname", id="out:2", name="")
         assert channel(state, "out:2")["nickname"] == ""
@@ -288,7 +297,7 @@ def test_connection_error_becomes_a_503_json_error(store: StudioStore) -> None:
     def refuse(address: str) -> Client:
         raise ConnectionError(f"no unit at {address}")
 
-    with TestClient(create_studio_app(DSPService(demo_settings(), client_factory=refuse), store=store)) as client:
+    with make_client(DSPService(demo_settings(), client_factory=refuse), store) as client:
         response = client.post("/api/connect", json={"address": "10.1.2.3"})
         assert response.status_code == 503
         assert response.json() == {"error": "no unit at 10.1.2.3"}
@@ -300,7 +309,7 @@ def test_other_errors_map_to_400_and_503(client: TestClient, monkeypatch: pytest
     for error, status in [(PermissionError("locked"), 400), (TimeoutError("slow"), 503), (OSError("io"), 503),
                           (RuntimeError("usb needs hidapi"), 503), (ValueError("bad"), 400)]:
         monkeypatch.setattr(service, "refresh", Mock(side_effect=error))
-        response = client.post("/api/refresh")
+        response = client.post("/api/refresh", json={})
         assert response.status_code == status
         assert response.json() == {"error": str(error)}
     assert client.post("/api/connect", json={}).status_code == 400
@@ -308,7 +317,7 @@ def test_other_errors_map_to_400_and_503(client: TestClient, monkeypatch: pytest
 
 
 class FakeDevice:
-    def __init__(self) -> None:
+    def __init__(self, *, ignore_writes: bool = False) -> None:
         self.settings = demo_settings()
         self.client = Mock(spec=Client)
         self.client.link_up = True
@@ -319,6 +328,8 @@ class FakeDevice:
 
         def set_mute(channel: int, muted: bool, *, output: bool = False, **kwargs: Any) -> None:
             self.writes.append(("mute", channel, muted))
+            if ignore_writes:
+                return
             self.settings = replace_control(self.settings, ControlKey(output, channel, "mute"), muted)
 
         self.client.set_mute.side_effect = set_mute
@@ -327,7 +338,7 @@ class FakeDevice:
 def test_connected_device_key_is_the_links_address_and_writes_go_to_the_fake(store: StudioStore) -> None:
     device = FakeDevice()
     service = DSPService(demo_settings(), client_factory=lambda address: device.client)
-    with TestClient(create_studio_app(service, store=store)) as client:
+    with make_client(service, store) as client:
         state = post(client, "/api/connect", address="usb")
         assert state["status"]["connected"] is True
         assert state["status"]["device"] == "usb:ABC123"
@@ -357,3 +368,160 @@ def test_the_app_does_not_import_gradio_or_plotly() -> None:
             "sys.exit(f'imported: {bad}' if bad else 0)")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_unlinking_one_of_two_members_dissolves_the_group(client: TestClient) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    state = post(client, "/api/unlink", id="out:1")
+    assert channel(state, "out:0")["link"] is None
+    assert channel(state, "out:1")["link"] is None
+
+
+# Write results
+
+@contextlib.contextmanager
+def connected(store: StudioStore, device: FakeDevice) -> Iterator[TestClient]:
+    service = DSPService(demo_settings(), client_factory=lambda address: device.client)
+    with make_client(service, store) as client:
+        post(client, "/api/connect", address="usb")
+        yield client
+
+
+def test_successful_immediate_write_reports_ok(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        state = post(client, "/api/now", id="out:1", block="mute", value=True)
+    assert state["result"] == {"ok": True, "errors": [], "conflicts": [], "pending": [], "verified": True}
+
+
+def test_demo_write_reports_ok_and_operations_without_a_write_report_null(client: TestClient) -> None:
+    assert post(client, "/api/now", id="out:1", block="mute", value=True)["result"]["ok"] is True
+    assert post(client, "/api/select", id="out:1")["result"] is None
+    assert post(client, "/api/link", id="out:0", letter=None)["result"] is None
+    assert "result" not in client.get("/api/state").json()
+
+
+def test_readback_disagreeing_with_a_write_is_visible(store: StudioStore) -> None:
+    device = FakeDevice(ignore_writes=True)
+    with connected(store, device) as client:
+        response = client.post("/api/now", json={"id": "out:1", "block": "mute", "value": True})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["ok"] is False
+    assert body["result"]["errors"]
+    assert channel(body, "out:1")["muted"] is False
+
+
+def test_a_write_that_raises_is_visible(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.set_mute.side_effect = OSError("usb write failed")
+    with connected(store, device) as client:
+        response = client.post("/api/now", json={"id": "out:1", "block": "mute", "value": True})
+    assert response.status_code == 200
+    assert response.json()["result"]["ok"] is False
+    assert any("usb write failed" in e for e in response.json()["result"]["errors"])
+
+
+def test_apply_with_an_external_conflict_reports_conflicts(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+        device.settings = replace_control(device.settings, ControlKey(True, 0, "delay"), 7.0)
+        state = post(client, "/api/apply")
+    assert state["result"]["ok"] is False
+    assert state["result"]["conflicts"] == ["Output 1: delay"]
+    assert state["result"]["pending"] == ["Output 1: delay"]
+    assert state["status"]["pending_count"] == 1
+
+
+def test_link_join_and_sync_report_their_immediate_writes(client: TestClient) -> None:
+    post(client, "/api/link", id="out:3", letter=None)
+    post(client, "/api/link/sections", letter="A", sections=["gain"])
+    post(client, "/api/now", id="out:3", block="gain", value=-4.0)
+    state = post(client, "/api/link", id="out:5", letter="A")
+    assert state["result"]["ok"] is True
+    post(client, "/api/link/sections", letter="A", sections=[])
+    post(client, "/api/now", id="out:5", block="gain", value=-1.0)
+    post(client, "/api/link/sections", letter="A", sections=["gain"])
+    state = post(client, "/api/link/sync", letter="A", **{"from": "out:3"})
+    assert state["result"]["ok"] is True
+    assert channel(state, "out:5")["gain_db"] == -4.0
+
+
+def wait_for(client: TestClient, done: Any) -> dict[str, Any]:
+    deadline = time.monotonic() + 3
+    state = client.get("/api/state").json()
+    while not done(state) and time.monotonic() < deadline:
+        time.sleep(0.1)
+        state = client.get("/api/state").json()
+    return state
+
+
+def test_live_flush_that_fails_to_verify_is_reported(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        post(client, "/api/live", enabled=True)
+        post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)  # the fake ignores set_delay
+        state = wait_for(client, lambda s: s["status"]["live_errors"])
+    assert "did not match readback" in state["status"]["live_errors"]
+    assert state["status"]["live"] is False
+
+
+def test_live_flush_with_an_external_conflict_is_reported(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        post(client, "/api/live", enabled=True)
+        device.settings = replace_control(device.settings, ControlKey(True, 0, "delay"), 7.0)
+        post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+        state = wait_for(client, lambda s: s["status"]["live_errors"])
+    assert "External changes conflict" in state["status"]["live_errors"]
+
+
+# Cross-site requests
+
+def test_post_without_the_json_media_type_is_refused_and_does_nothing(client: TestClient) -> None:
+    body = json.dumps({"id": "out:0", "kind": "delay", "field": "delay_ms", "value": 1.0})
+    for headers in ({"content-type": "text/plain"}, {"content-type": "application/x-www-form-urlencoded"}, {}):
+        response = client.post("/api/edit", content=body, headers=headers)
+        assert response.status_code == 415
+        assert "application/json" in response.json()["error"]
+    assert client.post("/api/apply", content=b"", headers={"content-type": "text/plain"}).status_code == 415
+    assert client.post("/api/apply").status_code == 415
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def test_json_media_type_with_parameters_is_accepted(client: TestClient) -> None:
+    response = client.post("/api/select", content=b'{"id": "out:1"}',
+                           headers={"content-type": "Application/JSON; charset=utf-8"})
+    assert response.status_code == 200
+
+
+def test_a_foreign_origin_is_refused(client: TestClient) -> None:
+    for origin in ("http://evil.example", "http://127.0.0.1:9999", "null"):
+        response = client.post("/api/select", json={"id": "out:1"}, headers={"origin": origin})
+        assert response.status_code == 403
+    assert client.get("/api/state").json()["selected"]["id"] == "in:0"
+    assert client.get("/api/state", headers={"origin": "http://evil.example"}).status_code == 403
+    assert client.post("/api/select", json={"id": "out:1"}, headers={"origin": "http://127.0.0.1"}).status_code == 200
+
+
+def test_a_foreign_host_is_refused_everywhere(client: TestClient) -> None:
+    for path in ("/api/state", "/", "/static/index.html"):
+        response = client.get(path, headers={"host": "evil.example"})
+        assert response.status_code == 400
+    assert client.post("/api/select", json={"id": "out:1"}, headers={"host": "evil.example:8000"}).status_code == 400
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.1:8765", "localhost", "LOCALHOST:80", "[::1]", "[::1]:8765"])
+def test_loopback_hosts_are_allowed(client: TestClient, host: str) -> None:
+    assert client.get("/api/state", headers={"host": host}).status_code == 200
+
+
+def test_extra_allowed_hosts_work_and_no_cors_headers_are_sent(store: StudioStore) -> None:
+    with make_client(DSPService(demo_settings()), store, allowed_hosts=["studio.lan", "fe80::1"]) as client:
+        assert client.get("/api/state", headers={"host": "studio.lan:8000"}).status_code == 200
+        assert client.get("/api/state", headers={"host": "[fe80::1]:8000"}).status_code == 200
+        assert client.get("/api/state", headers={"host": "other.lan"}).status_code == 400
+        response = client.post("/api/select", json={"id": "out:1"}, headers={"origin": "http://127.0.0.1"})
+        assert not any(h.lower().startswith("access-control-") for h in response.headers)
