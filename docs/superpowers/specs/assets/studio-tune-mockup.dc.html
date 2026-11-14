@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DSP Studio tune screen</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+body{margin:0;background:#111417}
+button{font:inherit;cursor:pointer}
+input,select{font:inherit}
+a{color:#9AA4B0}a:hover{color:#E6E9ED}
+</style>
+</helmet>
+<div style="min-height: 900px; box-sizing: border-box; background: #111417; color: #E6E9ED; font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.3; font-variant-numeric: tabular-nums">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 6px 16px; border-bottom: 1px solid #2A3038; background: #161A1F">
+<div style="font-size: 14px; font-weight: 700">DSP Studio</div>
+<div style="display: flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid #2A3038; border-radius: 4px; color: #C9D0D8; font-size: 12px">
+<span aria-hidden="true" style="width: 7px; height: 7px; border-radius: 50%; background: #4CC38A"></span>
+<span>LA448 · USB · connected</span>
+</div>
+<nav style="display: flex; gap: 2px">
+<button style="height: 30px; padding: 0 10px; border: 0; border-bottom: 2px solid {{accent}}; background: transparent; color: #E6E9ED; font-weight: 600">Tune</button>
+<button style="height: 30px; padding: 0 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #9AA4B0">Mixer</button>
+<button style="height: 30px; padding: 0 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #9AA4B0">Measurements</button>
+<button style="height: 30px; padding: 0 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #9AA4B0">Programs</button>
+</nav>
+<div style="flex: 1 1 0"></div>
+<label style="display: flex; align-items: center; gap: 6px; color: #C9D0D8"><input type="checkbox"> Live</label>
+<div style="color: #F2A33A; font-weight: 600">2 unapplied</div>
+<button style="height: 30px; padding: 0 12px; border: 1px solid #3A424C; border-radius: 4px; background: transparent; color: #E6E9ED">Revert</button>
+<button style="height: 30px; padding: 0 16px; border: 0; border-radius: 4px; background: {{accent}}; color: #0B1016; font-weight: 700">Apply</button>
+</header>
+
+<div style="display: flex; flex-direction: column; gap: 8px; padding: 8px 16px 16px">
+
+<section style="overflow-x: auto">
+<div style="display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 4px; min-width: 1080px">
+<sc-for list="{{channels}}" as="c" hint-placeholder-count="12">
+<div style="background: {{c.bg}}; border: 1px solid {{c.border}}; border-top: 3px solid {{c.top}}; border-radius: 4px; padding: 4px 6px 6px; display: flex; flex-direction: column; gap: 4px">
+<div style="display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 4px; align-items: center">
+<button onClick="{{c.pick}}" style="height: 24px; padding: 0; border: 0; background: transparent; color: #9AA4B0; font-size: 11px; font-weight: 600; text-align: left; white-space: nowrap">{{c.name}}</button>
+<input aria-label="Channel nickname" type="text" value="{{c.nick}}" placeholder="Name" style="height: 24px; box-sizing: border-box; width: 100%; padding: 0 4px; border-radius: 3px; border: 1px solid transparent; background: transparent; color: #E6E9ED; font-weight: 700">
+</div>
+<div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px">
+<input aria-label="Gain in decibels" type="text" value="{{c.gain}}" style="height: 24px; box-sizing: border-box; width: 100%; padding: 0 4px; border-radius: 3px; border: 1px solid #3A424C; background: #111417; color: #E6E9ED; text-align: right">
+<input aria-label="Delay in milliseconds" type="text" value="{{c.delay}}" style="height: 24px; box-sizing: border-box; width: 100%; padding: 0 4px; border-radius: 3px; border: 1px solid #3A424C; background: #111417; color: #E6E9ED; text-align: right">
+</div>
+<div style="display: grid; grid-template-columns: 26px 26px minmax(0, 1fr); gap: 4px">
+<button aria-label="Polarity" style="height: 24px; padding: 0; border-radius: 3px; border: 1px solid #3A424C; background: transparent; color: #C9D0D8">Ø</button>
+<button aria-label="Mute" style="height: 24px; padding: 0; border-radius: 3px; border: 1px solid {{c.muteBorder}}; background: {{c.muteBg}}; color: {{c.muteText}}; font-weight: 700">M</button>
+<button aria-label="Link group" style="height: 24px; padding: 0 4px; border-radius: 3px; border: 1px solid {{c.linkBorder}}; background: transparent; color: {{c.linkText}}; font-size: 11px; white-space: nowrap; overflow: hidden">{{c.link}}</button>
+</div>
+</div>
+</sc-for>
+</div>
+</section>
+
+<div style="color: #9AA4B0; font-size: 12px; padding: 0 2px">Gain, polarity and mute take effect immediately. Filters and delay wait for Apply.</div>
+
+<section style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 4px 10px; background: #1A1E23; border: 1px solid #2A3038; border-radius: 4px">
+<div style="font-size: 14px; font-weight: 700">{{selectedNick}} <span style="font-weight: 400; color: #9AA4B0">{{selectedName}}</span></div>
+<div style="color: #C9D0D8">Link A with Mid R · ties</div>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox" checked> Crossover</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox" checked> EQ</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox"> Gain</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox"> Delay</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox"> Limiter</label>
+<div style="flex: 1 1 0"></div>
+<div style="color: #9AA4B0">Show</div>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox"> Phase</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox"> Group delay</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox" checked> Each filter</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox" checked> On device</label>
+<label style="display: flex; align-items: center; gap: 4px"><input type="checkbox"> Measured</label>
+</section>
+
+<section style="background: #14181C; border: 1px solid #2A3038; border-radius: 4px; padding: 4px 8px 0">
+<svg role="img" aria-label="Magnitude response of the selected channel from 20 hertz to 20 kilohertz, with a 140 hertz high-pass, a cut at 2.5 kilohertz and a high shelf at 8 kilohertz" viewBox="-36 -8 1368 290" style="width: 100%; height: auto; display: block">
+<g stroke="#20262D" stroke-width="1">
+<path d="M175 0V260M440 0V260M615 0V260M880 0V260M1055 0V260M0 104H1320M0 156H1320M0 208H1320"></path>
+</g>
+<g stroke="#343C46" stroke-width="1">
+<path d="M307 0V260M747 0V260M1188 0V260M0 52H1320"></path>
+</g>
+<rect x="0" y="0" width="1320" height="260" fill="none" stroke="#2A3038"></rect>
+<g fill="#9AA4B0" font-size="11" font-family="Inter, system-ui, sans-serif" text-anchor="end">
+<text x="-6" y="8">+10</text><text x="-6" y="56">0</text><text x="-6" y="108">−10</text><text x="-6" y="160">−20</text><text x="-6" y="212">−30</text><text x="-6" y="260">−40</text>
+</g>
+<g fill="#9AA4B0" font-size="11" font-family="Inter, system-ui, sans-serif" text-anchor="middle">
+<text x="6" y="276">20</text><text x="175" y="276">50</text><text x="307" y="276">100</text><text x="440" y="276">200</text><text x="615" y="276">500</text><text x="747" y="276">1k</text><text x="880" y="276">2k</text><text x="1055" y="276">5k</text><text x="1188" y="276">10k</text><text x="1310" y="276">20k</text>
+</g>
+<path d="M95 260C180 205 300 120 372 83C430 60 500 53 615 52L1320 52" fill="none" stroke="#7C8794" stroke-width="1.25" stroke-dasharray="4 5"></path>
+<path d="M151 260C200 232 300 170 372 135C430 112 500 105 615 104L800 104C860 104 890 114 923 114C956 114 985 104 1040 103C1110 100 1190 95 1320 94" fill="none" stroke="#7C8794" stroke-width="1.5"></path>
+<path d="M151 260C200 232 300 170 372 135C430 112 500 105 615 104L800 104C860 104 890 125 923 125C956 125 985 104 1040 103C1110 100 1190 95 1320 94" fill="none" stroke="{{accent}}" stroke-width="2.25"></path>
+<g font-size="10" font-weight="700" font-family="Inter, system-ui, sans-serif" text-anchor="middle">
+<circle cx="372" cy="135" r="9" fill="#14181C" stroke="{{accent}}" stroke-width="2"></circle><text x="372" y="138.5" fill="#E6E9ED">HP</text>
+<circle cx="923" cy="125" r="9" fill="#14181C" stroke="#F2A33A" stroke-width="2"></circle><text x="923" y="128.5" fill="#E6E9ED">1</text>
+<circle cx="1145" cy="97" r="9" fill="#14181C" stroke="{{accent}}" stroke-width="2"></circle><text x="1145" y="100.5" fill="#E6E9ED">2</text>
+</g>
+<g font-size="11" font-family="Inter, system-ui, sans-serif" fill="#C9D0D8">
+<path d="M1010 14H1030" stroke="{{accent}}" stroke-width="2.25"></path><text x="1036" y="18">Your edits</text>
+<path d="M1110 14H1130" stroke="#7C8794" stroke-width="1.5"></path><text x="1136" y="18">On device</text>
+<path d="M1206 14H1226" stroke="#7C8794" stroke-width="1.25" stroke-dasharray="4 5"></path><text x="1232" y="18">High-pass alone</text>
+</g>
+</svg>
+</section>
+
+<section style="display: flex; flex-wrap: wrap; align-items: stretch; gap: 4px">
+<sc-for list="{{filters}}" as="f" hint-placeholder-count="5">
+<div style="flex: 0 0 132px; background: #1A1E23; border: 1px solid {{f.border}}; border-radius: 4px; padding: 5px 6px 6px; display: flex; flex-direction: column; gap: 4px">
+<label style="display: flex; align-items: center; gap: 6px; height: 22px; font-weight: 700; color: {{f.titleColor}}"><input type="checkbox" checked="{{f.on}}"> {{f.title}}</label>
+<sc-for list="{{f.rows}}" as="r" hint-placeholder-count="4">
+<div style="display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 4px; align-items: center">
+<span style="font-size: 11px; color: #9AA4B0">{{r.label}}</span>
+<sc-if value="{{r.isSelect}}" hint-placeholder-val="{{false}}">
+<select aria-label="{{r.aria}}" style="height: 24px; box-sizing: border-box; width: 100%; padding: 0 2px; border-radius: 3px; border: 1px solid #3A424C; background: #111417; color: {{f.valueColor}}"><option>{{r.value}}</option></select>
+</sc-if>
+<sc-if value="{{r.isInput}}" hint-placeholder-val="{{true}}">
+<input aria-label="{{r.aria}}" type="text" value="{{r.value}}" style="height: 24px; box-sizing: border-box; width: 100%; padding: 0 6px; border-radius: 3px; border: 1px solid {{r.border}}; background: #111417; color: {{f.valueColor}}; text-align: right">
+</sc-if>
+</div>
+</sc-for>
+</div>
+</sc-for>
+<button style="flex: 0 0 96px; min-height: 60px; border: 1px dashed #3A424C; border-radius: 4px; background: transparent; color: #C9D0D8; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px">
+<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+<span>Add band</span>
+<span style="font-size: 11px; color: #9AA4B0">2 of 15 used</span>
+</button>
+<div style="flex: 1 1 0"></div>
+<div style="flex: 0 0 150px; background: #1A1E23; border: 1px solid #2A3038; border-radius: 4px; display: flex; flex-direction: column">
+<sc-for list="{{more}}" as="m" hint-placeholder-count="4">
+<button style="flex: 1 1 0; min-height: 28px; padding: 0 8px; border: 0; border-top: 1px solid {{m.rule}}; background: transparent; color: #E6E9ED; display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left">
+<span style="font-weight: 600">{{m.name}}</span>
+<span style="color: #9AA4B0; font-size: 12px">{{m.state}}</span>
+</button>
+</sc-for>
+</div>
+</section>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#4DA3FF","options":["#4DA3FF","#5FD0B5","#F2A33A"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = { picked: 'Out 3' };
+}
+renderVals() {
+const accent = this.props.accent ?? '#4DA3FF';
+const picked = this.state.picked;
+const groups = { A: '#C58BFF', B: '#F2A33A' };
+const chan = (name, nick, kind, gain, delay, muted, group) => ({
+name, nick, kind, gain, delay,
+bg: name === picked ? '#232931' : '#1A1E23',
+border: name === picked ? accent : '#2A3038',
+top: name === picked ? accent : (kind === 'Input' ? '#3A424C' : '#2A3038'),
+muteBorder: muted ? '#FF6B5E' : '#3A424C',
+muteBg: muted ? '#FF6B5E' : 'transparent',
+muteText: muted ? '#1A0B09' : '#C9D0D8',
+link: group ? 'Link ' + group : 'Link',
+linkBorder: group ? groups[group] : '#3A424C',
+linkText: group ? groups[group] : '#9AA4B0',
+pick: () => this.setState({ picked: name }),
+});
+const row = (label, value, aria, opts) => ({
+label, value, aria,
+isSelect: !!(opts && opts.select), isInput: !(opts && opts.select),
+border: opts && opts.pending ? '#F2A33A' : '#3A424C',
+});
+const filt = (title, on, rows, pending) => ({
+title, on, rows,
+border: pending ? '#F2A33A' : '#2A3038',
+titleColor: on ? '#E6E9ED' : '#9AA4B0',
+valueColor: on ? '#E6E9ED' : '#9AA4B0',
+});
+const channels = [
+chan('In A', 'Left', 'Input', '0.0 dB', '0.00 ms', false, null),
+chan('In B', 'Right', 'Input', '0.0 dB', '0.00 ms', false, null),
+chan('In C', '', 'Input', '0.0 dB', '0.00 ms', true, null),
+chan('In D', '', 'Input', '0.0 dB', '0.00 ms', true, null),
+chan('Out 1', 'Sub L', 'Output', '-10.0 dB', '0.00 ms', false, 'B'),
+chan('Out 2', 'Sub R', 'Output', '-10.0 dB', '0.00 ms', false, 'B'),
+chan('Out 3', 'Mid L', 'Output', '-10.0 dB', '0.00 ms', false, 'A'),
+chan('Out 4', 'Mid R', 'Output', '-10.0 dB', '0.00 ms', false, 'A'),
+chan('Out 5', 'Top L', 'Output', '0.0 dB', '2.35 ms', false, null),
+chan('Out 6', 'Top R', 'Output', '0.0 dB', '2.35 ms', false, null),
+chan('Out 7', '', 'Output', '0.0 dB', '0.00 ms', true, null),
+chan('Out 8', '', 'Output', '0.0 dB', '0.00 ms', true, null),
+];
+return {
+accent,
+selectedName: picked,
+selectedNick: (channels.find((c) => c.name === picked) || {}).nick || '',
+channels,
+filters: [
+filt('High-pass', true, [row('Hz', '140', 'High-pass frequency'), row('Type', 'Linkwitz-Riley', 'High-pass family', { select: true }), row('Slope', '18 dB/oct', 'High-pass slope', { select: true })]),
+filt('Low-pass', false, [row('Hz', '20000', 'Low-pass frequency'), row('Type', 'Butterworth', 'Low-pass family', { select: true }), row('Slope', '6 dB/oct', 'Low-pass slope', { select: true })]),
+filt('EQ 1', true, [row('Type', 'Parametric', 'Band type', { select: true }), row('Hz', '2500', 'Band frequency'), row('dB', '-4.0', 'Band gain', { pending: true }), row('Q', '2.00', 'Band Q')], true),
+filt('EQ 2', true, [row('Type', 'High shelf', 'Band type', { select: true }), row('Hz', '8000', 'Band frequency'), row('dB', '+2.0', 'Band gain'), row('Q', '0.70', 'Band Q')]),
+],
+more: [
+{ name: 'Limiter', state: 'Off', rule: 'transparent' },
+{ name: 'Compressor', state: 'Off', rule: '#2A3038' },
+{ name: 'FIR', state: 'Off', rule: '#2A3038' },
+{ name: 'Copy channel…', state: '', rule: '#2A3038' },
+],
+};
+}
+}
+</script>
+</body>
+</html>
