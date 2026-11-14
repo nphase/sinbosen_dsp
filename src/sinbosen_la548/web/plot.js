@@ -286,9 +286,10 @@ export function createPlot(container, hooks) {
     endDrag(el ?? svg, true);
   }, true);
 
-  // The wheel over a handle changes Q by 5% per notch and never scrolls the page; elsewhere it scrolls as usual.
-  svg.addEventListener("wheel", (event) => {
-    const el = event.target.closest?.(".handle");
+  // The wheel over a handle changes Q by 5% per notch and never scrolls the page. The blocking listener sits on the
+  // handles only, so the wheel over the rest of the plot stays on the browser's fast scroll path.
+  handleLayer.addEventListener("wheel", (event) => {
+    const el = event.target.closest(".handle");
     if (!el) return;
     event.preventDefault();
     const key = el.dataset.key;

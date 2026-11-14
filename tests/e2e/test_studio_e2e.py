@@ -250,6 +250,25 @@ def test_add_band_adds_a_card_and_a_handle(studio: Studio) -> None:
     assert studio.handles().count() == 1
 
 
+def test_card_selects_show_their_text_unclipped(studio: Studio) -> None:
+    studio.add_band()
+    for name in ("EQ 1 type", "High-pass family", "High-pass slope"):
+        select = studio.field(name)
+        # Every option's text, as drawn in the select's font, fits inside the padding and the chevron.
+        room, text = select.evaluate("""async el => {
+            await document.fonts.ready;
+            const style = getComputedStyle(el);
+            const context = document.createElement("canvas").getContext("2d");
+            context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+            const room = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+            return [room, Math.max(...[...el.options].map(o => context.measureText(o.text).width))];
+        }""")
+        assert text <= room, (name, text, room)
+    option = studio.field("EQ 1 type").locator("option[value='0']")
+    assert option.text_content() == "Parametric"
+    assert option.get_attribute("title") == "Parametric EQ"
+
+
 def test_plot_has_a_handle_per_enabled_crossover_and_band_in_use(studio: Studio) -> None:
     studio.select("Out 3")
     assert studio.page.locator("#plot svg").count() == 1

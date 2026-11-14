@@ -18,6 +18,11 @@ const PLOT_OPTIONS = [
   ["each_filter", "Each filter", "filters"],
   ["on_device", "On device", "device_db"],
 ];
+// Shorter option text where the full name would be clipped on a 132 px card; the full name stays as the title.
+const SHORT_OPTIONS = {
+  "Parametric EQ": "Parametric", "Allpass (1st order)": "Allpass 1", "Allpass (2nd order)": "Allpass 2",
+  "Linkwitz–Riley": "Linkwitz",
+};
 const FIELD_NAMES = {
   freq_hz: "frequency", filter_type: "family", slope_db_per_oct: "slope", type: "type", gain_db: "gain", q: "Q",
 };
@@ -532,7 +537,9 @@ function cardControl(filter, field, target) {
       class: cls("field", field.pending && "pending"), "aria-label": name, disabled: !field.editable,
       "data-value": String(field.value),
       "data-action": act((el) => send("/api/edit", { ...target, field: field.key, value: Number(el.value) })),
-    }, field.options.map((o) => h("option", { value: String(o.value), selected: o.value === field.value }, o.label)));
+    }, field.options.map((o) => h("option", { value: String(o.value), selected: o.value === field.value,
+      title: SHORT_OPTIONS[o.label] ? o.label : false, "aria-label": SHORT_OPTIONS[o.label] ? o.label : false },
+    SHORT_OPTIONS[o.label] ?? o.label)));
   }
   const display = fieldDisplay[field.key] ?? String;
   // A handle gesture shows its values here before the server has answered.
