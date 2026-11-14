@@ -13,7 +13,7 @@ from . import codecs
 from .links import in_sync
 from .response import Response, channel_response, frequency_grid
 from .service import Change, ControlKey, ServiceView
-from .settings import ChannelSettings, CrossoverSettings, EQBandSettings
+from .settings import ChannelSettings, CrossoverSettings, DeviceSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup
 from .tuning import ALLPASS_TYPES, EQ_TYPES, XOVER_TYPES
 
@@ -67,14 +67,24 @@ def _select(key: str, label: str, value: int, options: list[dict[str, Any]], *, 
             "pending": pending}
 
 
+def _differs(base: object, now: object, attr: str) -> bool:
+    return base is not None and getattr(base, attr) != getattr(now, attr)
+
+
+def _channel_of(settings: DeviceSettings, selected: tuple[bool, int]) -> ChannelSettings:
+    output, index = selected
+    return (settings.outputs if output else settings.inputs)[index]
+
+
 def _crossover_card(kind: str, block: CrossoverSettings, base: CrossoverSettings | None,
                     key: ControlKey, pending_keys: set[ControlKey]) -> dict[str, Any]:
     def differs(attr: str) -> bool:
-        return base is not None and getattr(base, attr) != getattr(block, attr)
+        return _differs(base, block, attr)
 
     slopes = [_option(s, f"{s} dB/oct") for s in SLOPES]
     return {"key": kind, "kind": kind, "index": 0, "title": "High-pass" if kind == "hp" else "Low-pass",
-            "enabled": block.enabled, "pending": key in pending_keys,
+            "enabled": block.enabled, "enabled_pending": differs("enabled"),
+            "pending": key in pending_keys,
             "fields": [_number("freq_hz", "Hz", block.freq_hz, FREQ_BOUNDS, pending=differs("freq_hz")),
                        _select("filter_type", "Type", block.filter_type,
                                [_option(v, n) for v, n in XOVER_TYPES.items()], pending=differs("filter_type")),
@@ -85,10 +95,10 @@ def _crossover_card(kind: str, block: CrossoverSettings, base: CrossoverSettings
 def _eq_card(index: int, band: EQBandSettings, base: EQBandSettings | None,
              key: ControlKey, pending_keys: set[ControlKey]) -> dict[str, Any]:
     def differs(attr: str) -> bool:
-        return base is not None and getattr(base, attr) != getattr(band, attr)
+        return _differs(base, band, attr)
 
     return {"key": f"eq:{index}", "kind": "eq", "index": index, "title": f"EQ {index + 1}", "enabled": band.enabled,
-            "pending": key in pending_keys,
+            "enabled_pending": differs("enabled"), "pending": key in pending_keys,
             "fields": [_select("type", "Type", band.type, [_option(v, n) for v, n in EQ_TYPES.items()],
                                pending=differs("type")),
                        _number("freq_hz", "Hz", band.freq_hz, FREQ_BOUNDS, pending=differs("freq_hz")),
@@ -157,8 +167,8 @@ def _contribution_key(name: str) -> str:
 def _plot(view: ServiceView, selected: tuple[bool, int], pending_keys: set[ControlKey], *, phase: bool,
           group_delay: bool, each_filter: bool, on_device: bool) -> dict[str, Any]:
     output, index = selected
-    draft = (view.draft.outputs if output else view.draft.inputs)[index]
-    baseline = (view.baseline.outputs if output else view.baseline.inputs)[index]
+    draft = _channel_of(view.draft, selected)
+    baseline = _channel_of(view.baseline, selected)
     rate = view.draft.profile.sample_rate_hz
     handles = _plot_handles(draft)
     # Each handle's own frequency is a grid point, so its dot lands exactly on the curve.
@@ -192,7 +202,7 @@ def _handle_db(freq: NDArray[np.float64], total: Response, hz: float) -> float |
 
 def _channel_entry(view: ServiceView, notes: DeviceNotes, output: bool, index: int, selected: tuple[bool, int],
                    pending_keys: set[ControlKey]) -> dict[str, Any]:
-    ch = (view.draft.outputs if output else view.draft.inputs)[index]
+    ch = _channel_of(view.draft, (output, index))
     group = _group_of(notes, output, index)
     return {"id": _channel_id(output, index), "label": _channel_label(output, index),
             "nickname": notes.nicknames.get((output, index), ""), "gain_db": ch.base.gain_db,
@@ -206,8 +216,8 @@ def _channel_entry(view: ServiceView, notes: DeviceNotes, output: bool, index: i
 def _selected_entry(view: ServiceView, notes: DeviceNotes, selected: tuple[bool, int],
                     pending_keys: set[ControlKey]) -> dict[str, Any]:
     output, index = selected
-    draft = (view.draft.outputs if output else view.draft.inputs)[index]
-    baseline = (view.baseline.outputs if output else view.baseline.inputs)[index]
+    draft = _channel_of(view.draft, selected)
+    baseline = _channel_of(view.baseline, selected)
     group = _group_of(notes, output, index)
     link = None
     if group is not None:

@@ -278,3 +278,38 @@ def test_non_finite_values_become_null(service: DSPService, token: str, monkeypa
     assert plot["group_delay_ms"][:2] == [None, None]
     json.dumps(plot, allow_nan=False)
 
+
+
+def handle(result: dict[str, Any], key: str) -> dict[str, Any]:
+    return next(h for h in result["plot"]["handles"] if h["key"] == key)
+
+
+def test_enabled_only_change_marks_the_card_but_no_field(service: DSPService, token: str) -> None:
+    stage_band(service, token, 2, 0, gain_db=3.0, enabled=False)
+    service.stage(token, ControlKey(True, 2, "hp"),
+                  replace(controls(service.view(token).draft)[ControlKey(True, 2, "hp")], enabled=True))
+    result = state(service, token)
+    assert card(result, "eq:0")["enabled_pending"] is False
+    hp = card(result, "hp")
+    assert hp["pending"] is True and hp["enabled_pending"] is True
+    assert not any(f["pending"] for f in hp["fields"])
+    assert handle(result, "hp")["pending"] is True
+
+
+def test_enabled_only_change_on_an_eq_band(service: DSPService, token: str) -> None:
+    stage_band(service, token, 2, 0, enabled=True)
+    result = state(service, token)
+    band = card(result, "eq:0")
+    assert band["pending"] is True and band["enabled_pending"] is True
+    assert not any(f["pending"] for f in band["fields"])
+    assert handle(result, "eq:0")["pending"] is True
+
+
+def test_field_only_change_leaves_enabled_not_pending(service: DSPService, token: str) -> None:
+    stage_band(service, token, 2, 0, gain_db=2.0)
+    result = state(service, token)
+    band = card(result, "eq:0")
+    assert band["pending"] is True and band["enabled_pending"] is False
+    assert [f["key"] for f in band["fields"] if f["pending"]] == ["gain_db"]
+    assert handle(result, "eq:0")["pending"] is True
+    assert card(result, "hp")["enabled_pending"] is False
