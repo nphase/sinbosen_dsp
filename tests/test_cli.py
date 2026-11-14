@@ -417,6 +417,7 @@ def test_import_rew_dry_run_prints_the_mapping_and_sends_nothing(monkeypatch, tm
     out = capsys.readouterr().out
     assert "Filter 2 (PK)" in out and "1911 Hz" in out
     assert "no packet was sent" in out
+    assert "bands 3-7 of input 2 would be reset to flat parametric bands if in use" in out
 
 
 def test_import_rew_refuses_unsupported_filters_before_connecting(monkeypatch, tmp_path: Path, capsys):

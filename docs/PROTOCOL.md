@@ -832,9 +832,9 @@ decimal comma.
 |---|---|---|
 | `PK`, `PEQ`, `Modal` | EQ band, type 0 peaking | REW's Generic PK is the RBJ peaking filter with bandwidth `fc/Q` between the half-gain points. The device applies RBJ after `Q_effective = Q_wire / 10**(abs(gain_db)/40)`, so the stored Q is `Q_rew * 10**(abs(gain_db)/40)` |
 | `AP` | EQ band, type 4 second-order allpass | Q stored as given, gain 0 |
-| `HP`, `LP` | crossover, Butterworth 12 dB/oct | REW's Generic HP/LP are second order with Q 0.7071; a Q other than that in the line is refused |
+| `HP`, `LP` | crossover, Butterworth 12 dB/oct | REW's Generic HP/LP are second order with Q 0.7071; a Q other than that on the line is refused |
 | `HP1`, `LP1` | crossover, Butterworth 6 dB/oct | first order, -3 dB at Fc |
-| `HPQ`, `LPQ` | crossover, 12 dB/oct | the Q in the line picks the family: 0.707 is Butterworth, 0.5 is Linkwitz-Riley; any other Q has no device equivalent and is refused |
+| `HPQ`, `LPQ` | crossover, 12 dB/oct | the Q in the line picks the family: within 0.005 of 0.7071 is Butterworth, within 0.005 of 0.5 is Linkwitz-Riley; any other Q has no device equivalent and is refused |
 | `LS`, `HS` and variants (`LSC`, `LS Q`, `LS 6dB`, `LS 12dB`, ...) | refused | the device's shelves have fixed, non-standard shapes and ignore Q |
 | any other `HP...`/`LP...` kind (`LP 24dB`, ...) | refused | no exact device equivalent |
 | `NO` | refused | REW's notch is full depth; type 5 is a finite cut with its own bandwidth rule |
@@ -854,7 +854,7 @@ The crossover is replaced only when the file contains that filter: a file with
 no HP leaves the channel's high-pass exactly as it is, and the same for the
 low-pass.
 
-An EQ filter is also refused when it has no Q (for example `BW Oct` exports),
+Any filter line that carries text beyond its type, `Fc`, `Gain`, `Q` and (for Modal) `T60 target` is refused, quoting that text (for example `HP Fc 80 Hz LR 24dB`), so that a different filter is never fitted in its place; the other filters still import. An EQ filter is also refused when it has no Q,
 its frequency rounds outside 10-20000 Hz, its gain is outside +-20 dB, or
 its stored Q falls outside the encodable 0.404-28.85. A high-Q filter with
 a large gain can exceed that limit even though REW's own Q does not: a

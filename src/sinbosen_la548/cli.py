@@ -204,7 +204,8 @@ def _cmd_import_rew(args: argparse.Namespace) -> int:
         print(f"skipped {item.source.label}: {item.reason}")
     unused = f"bands {len(mapping.bands) + 1}-{band_count}" if len(mapping.bands) < band_count else "no other bands"
     if args.dry_run:
-        print(f"dry run: no packet was sent; {unused} of {kind} {args.channel} would be disabled if enabled")
+        print(f"dry run: no packet was sent; {unused} of {kind} {args.channel} would be reset to flat parametric "
+              "bands if in use")
         return 0
     with Client(args.ip) as client:
         plan = rew.plan_bands(client.read_settings(), mapping, output=args.output, channel=args.channel)

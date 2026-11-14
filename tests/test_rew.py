@@ -136,7 +136,7 @@ def test_all_pass_maps_to_the_second_order_allpass_with_zero_gain():
         ("Filter  1: ON  LP 24dB  Fc    2000 Hz", "no exact device equivalent"),
         ("Filter  1: ON  NO       Fc      60 Hz", "notch"),
         ("Filter  1: ON  BP       Fc     500 Hz  Q  1.000", "not available"),
-        ("Filter  1: ON  PK       Fc     100 Hz  Gain  -3.0 dB  BW Oct  0.50", "no Q"),
+        ("Filter  1: ON  PK       Fc     100 Hz  Gain  -3.0 dB  BW Oct  0.50", "unrecognised text 'BW Oct  0.50'"),
         ("Filter  1: ON  PK       Fc     5.0 Hz  Gain  -3.0 dB  Q  2.000", "10-20000 Hz"),
         ("Filter  1: ON  PK       Fc   21000 Hz  Gain  -3.0 dB  Q  2.000", "10-20000 Hz"),
         ("Filter  1: ON  PK       Fc     100 Hz  Gain -24.0 dB  Q  2.000", "20 dB"),
@@ -349,3 +349,51 @@ def test_staged_controls_skip_hp_on_an_input_as_unsupported():
         rew.staged_controls(FIXTURE, text, output=False, channel=0)
     staged = rew.staged_controls(FIXTURE, text, output=False, channel=0, skip_unsupported=True)
     assert list(staged) == [ControlKey(False, 0, "eq", 0)]
+
+
+@pytest.mark.parametrize(
+    ("line", "leftover"),
+    [
+        ("Filter  1: ON  HP       Fc    80.0 Hz  LR 24dB", "LR 24dB"),
+        ("Filter  1: ON  LP       Fc    2000 Hz  Slope 48 dB/oct", "Slope 48 dB/oct"),
+        ("Filter  1: ON  HP       Fc      80 Hz  BW Oct  1.0", "BW Oct  1.0"),
+        ("Filter  1: ON  PK       Fc     100 Hz  Gain  -3.0 dB  Q  2.00  Order 4", "Order 4"),
+    ],
+)
+def test_a_filter_line_with_text_the_parser_does_not_know_is_unsupported_not_fitted(line, leftover):
+    mapping = rew.map_filters(rew.parse(_lines(line)), band_count=15)
+    assert (mapping.bands, mapping.high_pass, mapping.low_pass) == ((), None, None)
+    assert mapping.unsupported[0].reason == (
+        f"unrecognised text '{leftover}'; not imported so that a different filter is not fitted in its place")
+
+
+def test_unrecognised_text_on_one_filter_does_not_stop_the_others():
+    mapping = rew.map_filters(rew.parse(_lines(
+        "Filter  1: ON  HP       Fc    80.0 Hz  LR 24dB",
+        "Filter  2: ON  PK       Fc     100 Hz  Gain  -3.0 dB  Q  2.00",
+    )), band_count=15)
+    assert [b.source.number for b in mapping.bands] == [2]
+    assert [u.source.number for u in mapping.unsupported] == [1]
+
+
+def test_the_modal_t60_field_and_the_real_export_layout_are_recognised():
+    modal = "Filter  6: ON  Modal    Fc    42.0 Hz  Gain  -8.0 dB  Q  6.000  T60 target   400 ms\n"
+    export = rew.parse(GENERIC + modal)
+    assert [f.extra for f in export.filters] == [""] * 6
+    assert rew.map_filters(export, band_count=15).unsupported == ()
+
+
+@pytest.mark.parametrize(("q", "wanted"), [("0.71", (0, 12)), ("0.707", (0, 12)), ("0.7071", (0, 12)),
+                                           ("0.5", (1, 12)), ("0.50", (1, 12)), ("0.504", (1, 12)),
+                                           ("0.496", (1, 12))])
+def test_hpq_q_within_five_thousandths_maps(q, wanted):
+    mapped = _xover(f"Filter  1: ON  HPQ      Fc     100 Hz  Q  {q}")
+    assert (mapped.block.filter_type, mapped.block.slope_db_per_oct) == wanted
+
+
+@pytest.mark.parametrize("q", ["0.72", "0.49", "0.52", "0.6", "1.0"])
+def test_hpq_q_outside_the_two_importable_values_says_what_it_found_and_what_is_importable(q):
+    mapping = rew.map_filters(rew.parse(_lines(f"Filter  1: ON  LPQ      Fc     100 Hz  Q  {q}")), band_count=15)
+    assert mapping.low_pass is None
+    reason = mapping.unsupported[0].reason
+    assert f"Q {float(q):g}" in reason and "0.707" in reason and "0.5" in reason

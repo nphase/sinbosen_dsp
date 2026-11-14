@@ -31,6 +31,7 @@ _NUMBER = r"([-+]?\d[\d.,]*)"
 _FC = re.compile(rf"\bFc\s+{_NUMBER}\s*Hz", re.IGNORECASE)
 _GAIN = re.compile(rf"\bGain\s+{_NUMBER}\s*dB", re.IGNORECASE)
 _Q = re.compile(rf"\bQ\s+{_NUMBER}")
+_T60 = re.compile(rf"\bT60\s+target\s+{_NUMBER}\s*ms", re.IGNORECASE)  # Modal filters carry one
 
 EQ_FREQ_HZ = (10, 20000)
 EQ_GAIN_DB = 20.0
@@ -38,7 +39,7 @@ _PEAKING, _ALLPASS2 = 0, 4
 _BUTTERWORTH, _LINKWITZ_RILEY = 0, 1
 _BUTTERWORTH_Q = 0.5**0.5
 _LINKWITZ_RILEY_Q = 0.5
-_Q_TOLERANCE = 0.001  # REW writes Q to three decimals
+_Q_TOLERANCE = 0.005  # REW writes Q to two or three decimals
 # REW kinds that are an HP or LP: (crossover band, form). Generic HP/LP are 12 dB/oct Butterworth, HP1/LP1 are first
 # order, HPQ/LPQ are 12 dB/oct with the Q in the file.
 _CROSSOVER_KINDS = {
@@ -59,6 +60,7 @@ class RewFilter:
     freq_hz: float | None = None
     gain_db: float | None = None
     q: float | None = None
+    extra: str = ""  # text on the line after the type that no field above accounts for
 
     @property
     def label(self) -> str:
@@ -142,12 +144,17 @@ def parse(text: str) -> RewExport:
         if not kind:
             raise ValueError(f"line {line_number}: filter has no type: {line.strip()!r}")
         gain, q = _GAIN.search(rest), _Q.search(rest)
+        extra = rest[fc.end():]
+        for known in (_GAIN, _Q, _T60):
+            extra = known.sub(" ", extra)
+        extra = extra.strip()
         try:
             filters.append(RewFilter(
                 number, enabled, kind,
                 freq_hz=_number(fc.group(1)),
                 gain_db=_number(gain.group(1)) if gain else None,
                 q=_number(q.group(1)) if q else None,
+                extra=extra,
             ))
         except ValueError:
             raise ValueError(f"line {line_number}: unreadable number in {line.strip()!r}") from None
@@ -231,8 +238,8 @@ def _map_crossover(source: RewFilter, band: str, form: str) -> MappedCrossover |
         elif abs(q - _LINKWITZ_RILEY_Q) <= _Q_TOLERANCE and form == "q":
             filter_type, slope = _LINKWITZ_RILEY, 12
         else:
-            return Unsupported(source, f"Q {q:g} has no device equivalent: the device's 12 dB/oct crossovers are "
-                                       "Butterworth (Q 0.707) and Linkwitz-Riley (Q 0.5)")
+            return Unsupported(source, f"Q {q:g} has no device equivalent: the Q values that can be imported are "
+                                       "0.707 (Butterworth) and 0.5 (Linkwitz-Riley)")
     notes: list[str] = []
     freq_hz = int(source.freq_hz + 0.5)
     if not EQ_FREQ_HZ[0] <= freq_hz <= EQ_FREQ_HZ[1]:
@@ -274,6 +281,11 @@ def map_filters(export: RewExport, *, band_count: int, crossover_unavailable: st
     for source in export.filters:
         if not source.enabled or source.kind == "None":
             skipped.append(source)
+            continue
+        if source.extra:
+            unsupported.append(Unsupported(
+                source, f"unrecognised text '{source.extra}'; not imported so that a different filter is not "
+                        "fitted in its place"))
             continue
         if (crossover := _CROSSOVER_KINDS.get(" ".join(source.kind.upper().split()))) is not None:
             band, form = crossover
