@@ -421,3 +421,41 @@ def test_latency_is_labelled_with_the_nickname_when_there_is_one(service: DSPSer
     notes = DeviceNotes({(True, 2): "Mid L"}, ())
     assert state(service, token, notes)["selected"]["latency"]["channel"] == "Mid L"
     assert state(service, token, notes, selected=(True, 3))["selected"]["latency"]["channel"] == "Out 4"
+
+
+# Mixer
+
+def route_key(input_index: int, output_index: int) -> ControlKey:
+    return ControlKey(False, input_index, "route", output_index)
+
+
+def test_mixer_matches_the_draft_matrix(service: DSPService, token: str) -> None:
+    mixer = state(service, token)["mixer"]
+    matrix = service.view(token).draft.mix_matrix
+    assert [[cell["on"] for cell in row] for row in mixer["cells"]] == [list(row) for row in matrix]
+    assert all(not cell["pending"] for row in mixer["cells"] for cell in row)
+    assert [i["label"] for i in mixer["inputs"]] == ["In A", "In B", "In C", "In D"]
+    assert [o["label"] for o in mixer["outputs"]] == [f"Out {n}" for n in range(1, 9)]
+    assert [o["id"] for o in mixer["outputs"]][:2] == ["out:0", "out:1"]
+    # The demo routes A to 1, B to 2, C to 5 and 6 and D to 7 and 8: outputs 3 and 4 have no input.
+    assert [o["no_input"] for o in mixer["outputs"]] == [False, False, True, True, False, False, False, False]
+
+
+def test_a_staged_route_is_pending_and_counted(service: DSPService, token: str) -> None:
+    service.stage(token, route_key(0, 2), True)
+    result = state(service, token)
+    cells = result["mixer"]["cells"]
+    assert cells[0][2] == {"on": True, "pending": True}
+    assert sum(cell["pending"] for row in cells for cell in row) == 1
+    assert result["status"]["pending_count"] == 1
+    assert result["mixer"]["outputs"][2]["no_input"] is False
+
+
+def test_mixer_headers_carry_nicknames_and_mutes(service: DSPService, token: str) -> None:
+    service.stage_many(token, {ControlKey(True, 1, "mute"): True, ControlKey(False, 3, "mute"): True}, immediate=True)
+    notes = DeviceNotes({(False, 0): "Left", (True, 1): "Sub L"}, ())
+    mixer = state(service, token, notes)["mixer"]
+    assert mixer["inputs"][0] == {"id": "in:0", "label": "In A", "nickname": "Left", "muted": False}
+    assert mixer["inputs"][3]["muted"] is True
+    assert mixer["outputs"][1] == {"id": "out:1", "label": "Out 2", "nickname": "Sub L", "muted": True,
+                                   "no_input": False}

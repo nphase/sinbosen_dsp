@@ -190,6 +190,28 @@ and is not included (see Group delay); the unit can be 0.667 ms slower depending
 on its most recent Kaiser-window FIR write, which cannot be read back; and the
 figures were measured on one LA548 from input A to output 1.
 
+### Mixer tab
+
+The **Mixer** tab, next to **Tune** in the top bar, shows the unit's routing
+matrix: one row per input (In A-D) and one column per output (Out 1-8). Each
+header shows the channel's nickname over its fixed label, or the label alone.
+An output fed by no input says "no input" under its header, and a muted channel
+has a small red **M** in its header. The top bar and the channel strips are the
+same on both tabs; the latency readout shows only on Tune.
+
+Each crossing is a toggle, filled when that input feeds that output; the unit
+routes on or off and has no level per crossing. Clicking one is a draft like a
+filter edit: it gets the orange unapplied outline, counts in the unapplied
+total and reaches the unit on **Apply**, or as you edit with **Live** on. It is
+never written at once, because a wrong click could send a full-range signal to
+a tweeter. Links do not tie routing. Screen readers announce a crossing as, for
+example, "Left to Sub L, connected".
+
+With a crossing focused, the arrow keys move to the next one and Space or Enter
+toggles it; only one crossing is in the Tab order. The Tune tab's latency
+readout follows the drafted routing. The chosen tab is remembered for the
+browser tab, so a reload opens the same one.
+
 ### Nicknames
 
 The nickname is shown in the strip's header. A long one covers the fixed label
@@ -210,7 +232,6 @@ file, `~/.config/sinbosen-la548/studio.json`, under a key for the unit: its
 
 These need `--classic` for now:
 
-- the mixer (routing matrix);
 - loading programs, presets and channel copy (saving is on the Tune screen, see
   "Saving");
 - measured traces, the Measured overlay and alignment;

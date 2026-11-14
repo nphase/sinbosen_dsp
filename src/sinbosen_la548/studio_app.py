@@ -289,6 +289,17 @@ class _Studio:
         key = ControlKey(output, channel, "eq", index)
         self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: band}))
 
+    def route(self, body: dict[str, Any]) -> None:
+        """Stage one crossing of the mix matrix. Routing is a draft like any filter edit, never written at once: a
+        wrong click could send a full-range signal to a tweeter. Links do not tie routing."""
+        matrix = self.service.view(self.token).draft.mix_matrix
+        source, target, on = _index(body, "input"), _index(body, "output"), _flag(body, "on")
+        if not 0 <= source < len(matrix):
+            raise ValueError("input out of range")
+        if not 0 <= target < len(matrix[source]):
+            raise ValueError("output out of range")
+        self.service.stage(self.token, ControlKey(False, source, "route", target), on)
+
     # Notes
 
     def nickname(self, body: dict[str, Any]) -> None:
@@ -497,6 +508,7 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
         post_route("/api/edit", studio.edit),
         post_route("/api/band/add", studio.band_add),
         post_route("/api/band/remove", studio.band_remove),
+        post_route("/api/route", studio.route),
         post_route("/api/nickname", studio.nickname),
         post_route("/api/link", studio.link),
         post_route("/api/unlink", studio.unlink),

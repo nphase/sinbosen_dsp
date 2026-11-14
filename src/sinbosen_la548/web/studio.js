@@ -4,6 +4,7 @@
 
 import { ApiError, getState, post } from "./api.js";
 import { createHandleGestures, targetOf } from "./handles.js";
+import { createMixer } from "./mixer.js";
 import { createPlot } from "./plot.js";
 import { createSavePopover } from "./save.js";
 
@@ -11,6 +12,10 @@ const POLL_MS = 1000;
 const HINT = "Gain is sent when you press Enter; polarity and mute take effect immediately.";
 const HINT_DRAFT = "Filters and delay wait for Apply.";
 const HINT_LIVE = "Filters and delay are sent as you edit.";
+const HINT_ROUTING_DRAFT = "Routing waits for Apply.";
+const HINT_ROUTING_LIVE = "Routing is sent as you edit.";
+const TAB_KEY = "studio.tab";  // the chosen tab, kept in sessionStorage for reloads
+const TABS = [["tune", "Tune"], ["mixer", "Mixer"]];
 const SECTION_LABELS = { crossover: "Crossover", eq: "EQ", delay: "Delay", limiter: "Limiter" };
 // [option posted to /api/plot, label, the plot key present while the option is on]
 const PLOT_OPTIONS = [
@@ -30,8 +35,18 @@ const FIELD_NAMES = {
 const PLUS_ICON = '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
   + 'stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
 
+// Storage can be unavailable (a private window, blocked site data); the page then opens on Tune.
+function storedTab() {
+  try {
+    return sessionStorage.getItem(TAB_KEY) === "mixer" ? "mixer" : "tune";
+  } catch {
+    return "tune";
+  }
+}
+
 let state = null;
 const ui = {
+  tab: storedTab(),    // "tune" or "mixer": page state, not the server's
   typing: null,        // {id, text, error, busy}: the field being typed in
   menu: null,          // {kind: "connection" | "link" | "sync" | "save", id}
   focusMenu: false,
@@ -78,6 +93,7 @@ function icon(markup) {
 
 const cls = (...names) => names.filter(Boolean).join(" ");
 const savePopover = createSavePopover({ ui, state: () => state, h, act, cls, below, send, render });
+const mixer = createMixer({ state: () => state, h, act, cls, send, render });
 
 function act(handler) {
   const id = String(actions.size);
@@ -274,6 +290,15 @@ function connect() {
   });
 }
 
+function showTab(tab) {
+  ui.tab = tab;
+  try {
+    sessionStorage.setItem(TAB_KEY, tab);
+  } catch {
+    // The choice then lasts until the page is reloaded.
+  }
+}
+
 function openMenu(kind, id = null) {
   const open = ui.menuBefore?.kind === kind && ui.menuBefore?.id === id;
   ui.menu = open ? null : { kind, id };
@@ -333,8 +358,9 @@ function topBar() {
       "aria-hidden": "true" }),
     h("span", null, connectionText(status))),
     h("nav", { class: "tabs", "aria-label": "Screens" },
-      h("button", { type: "button", class: "tab", "aria-current": "page" }, "Tune")),
-    latencyReadout(state.selected.latency),
+      TABS.map(([tab, label]) => h("button", { type: "button", class: "tab", "aria-current": ui.tab === tab && "page",
+        "data-action": act(() => showTab(tab)) }, label))),
+    ui.tab === "tune" ? latencyReadout(state.selected.latency) : h("div", { class: "spacer" }),
     h("label", { class: "check live", title: status.connected ? "" : "Live needs a connected unit" },
       h("input", { type: "checkbox", checked: status.live, disabled: !status.connected,
         "data-action": act((el) => send("/api/live", { enabled: el.checked })) }), "Live"),
@@ -459,7 +485,9 @@ function strip(channel) {
 function hint() {
   const message = state.status.message;
   const notice = ui.notice?.message === message ? ui.notice.text : null;
-  return [h("span", null, `${HINT} ${state.status.live ? HINT_LIVE : HINT_DRAFT}`),
+  const live = state.status.live;
+  const drafts = ui.tab === "mixer" ? (live ? HINT_ROUTING_LIVE : HINT_ROUTING_DRAFT) : (live ? HINT_LIVE : HINT_DRAFT);
+  return [h("span", null, `${HINT} ${drafts}`),
     h("span", { class: cls("message", notice && "notice") }, notice ?? message)];
 }
 
@@ -673,10 +701,18 @@ function render() {
   patch("strips", state.channels.map(strip));
   coverLabels();
   patch("hint", hint());
-  patch("selected-bar", selectedBar());
-  patch("cards", cards());
-  plot ??= createPlot(document.getElementById("plot"), gestures.hooks);
-  plot.draw(state.plot, state.selected.filters, ui.handle?.target.id === state.selected.id ? ui.handle : null);
+  // The strips stay on both tabs; the selected channel's bar, plot and cards belong to Tune.
+  const tuning = ui.tab === "tune";
+  for (const id of ["selected-bar", "plot", "cards"]) document.getElementById(id).hidden = !tuning;
+  document.getElementById("mixer").hidden = tuning;
+  if (tuning) {
+    patch("selected-bar", selectedBar());
+    patch("cards", cards());
+    plot ??= createPlot(document.getElementById("plot"), gestures.hooks);
+    plot.draw(state.plot, state.selected.filters, ui.handle?.target.id === state.selected.id ? ui.handle : null);
+  } else {
+    patch("mixer", mixer.view());
+  }
   patch("overlay", overlay());
   if (ui.focusMenu) {
     ui.focusMenu = false;
@@ -720,7 +756,9 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("keydown", (event) => {
   const el = event.target;
-  if (event.key === "Escape") {
+  if (mixer.keydown(event)) {
+    event.preventDefault();
+  } else if (event.key === "Escape") {
     if (ui.menu) {
       const anchor = document.getElementById({ connection: "connection", sync: "sync-chip", save: "save" }[ui.menu.kind]
         ?? `link-${ui.menu.id}`);

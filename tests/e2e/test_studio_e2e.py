@@ -1098,3 +1098,126 @@ def test_a_save_that_fails_after_its_apply_says_the_edits_were_applied(connected
         "Your edits were applied, but saving to slot 1 failed: usb write failed").wait_for()
     assert connected_studio.unapplied().inner_text() == ""
     assert page.locator("#hint").get_by_text("Saved to").count() == 0
+
+
+# Mixer
+
+def _mixer(studio: Studio) -> Any:
+    studio.page.get_by_role("button", name="Mixer", exact=True).click()
+    mixer = studio.page.locator("#mixer")
+    mixer.locator(".route").first.wait_for()
+    return mixer
+
+
+def _route(studio: Studio, name: str) -> Any:
+    return studio.page.locator("#mixer").get_by_role("button", name=name, exact=True)
+
+
+def test_the_mixer_tab_shows_a_cell_per_input_and_output(studio: Studio) -> None:
+    mixer = _mixer(studio)
+    assert studio.page.get_by_role("button", name="Mixer", exact=True).get_attribute("aria-current") == "page"
+    assert studio.page.get_by_role("button", name="Tune", exact=True).get_attribute("aria-current") is None
+    assert mixer.locator(".route").count() == 32
+    assert mixer.locator("thead .mixer-label").all_inner_texts() == [f"Out {n}" for n in range(1, 9)]
+    assert mixer.locator("tbody .mixer-label").all_inner_texts() == ["In A", "In B", "In C", "In D"]
+    assert _route(studio, "In A to Out 1, connected").get_attribute("aria-pressed") == "true"
+    assert _route(studio, "In A to Out 2, not connected").get_attribute("aria-pressed") == "false"
+    # The demo feeds nothing to outputs 3 and 4.
+    assert mixer.locator("thead th").filter(has_text="no input").all_inner_texts() == ["Out 3\nno input",
+                                                                                         "Out 4\nno input"]
+    assert studio.page.locator(".strip").count() == 12
+    assert studio.page.locator("#topbar .latency").count() == 0
+    for hidden in ("#selected-bar", "#plot", "#cards"):
+        assert not studio.page.locator(hidden).is_visible()
+    box = mixer.locator(".route").first.bounding_box()
+    assert box is not None and (box["width"], box["height"]) == (44, 28)
+
+
+def test_a_route_click_is_unapplied_until_apply(studio: Studio) -> None:
+    _mixer(studio)
+    with studio.page.expect_response("**/api/route") as response:
+        _route(studio, "In A to Out 3, not connected").click()
+    assert json.loads(response.value.request.post_data or "{}") == {"input": 0, "output": 2, "on": True}
+    cell = _route(studio, "In A to Out 3, connected")
+    cell.wait_for()
+    assert cell.get_attribute("aria-pressed") == "true"
+    assert cell.evaluate("el => getComputedStyle(el).borderTopColor") == PENDING_BORDER
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    assert studio.page.locator("#mixer thead th").filter(has_text="no input").count() == 1
+    with studio.page.expect_response("**/api/apply"):
+        studio.page.get_by_role("button", name="Apply", exact=True).click()
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for(state="detached")
+    assert cell.evaluate("el => getComputedStyle(el).borderTopColor") != PENDING_BORDER
+    assert cell.get_attribute("aria-pressed") == "true"
+    hosts = {urlsplit(url).hostname for url in studio.requests}
+    assert hosts == {"127.0.0.1"}, studio.requests
+
+
+def test_the_tab_choice_survives_a_reload(studio: Studio) -> None:
+    _mixer(studio)
+    studio.load()
+    studio.page.locator("#mixer .route").first.wait_for()
+    assert studio.page.get_by_role("button", name="Mixer", exact=True).get_attribute("aria-current") == "page"
+    studio.page.get_by_role("button", name="Tune", exact=True).click()
+    studio.page.locator("#plot").wait_for()
+    studio.load()
+    studio.page.locator("#topbar .latency").wait_for()
+    assert not studio.page.locator("#mixer").is_visible()
+
+
+def test_arrow_keys_move_between_cells_and_space_and_enter_toggle(studio: Studio) -> None:
+    _mixer(studio)
+    first = _route(studio, "In A to Out 1, connected")
+    first.focus()
+    studio.page.keyboard.press("ArrowRight")
+    studio.page.keyboard.press("ArrowDown")
+    focused = "document.activeElement.getAttribute('aria-label')"
+    assert studio.page.evaluate(focused) == "In B to Out 2, connected"
+    studio.page.keyboard.press("ArrowLeft")
+    studio.page.keyboard.press("ArrowLeft")  # stays in the first column
+    studio.page.keyboard.press("ArrowUp")
+    studio.page.keyboard.press("ArrowUp")  # and the first row
+    assert studio.page.evaluate(focused) == "In A to Out 1, connected"
+    studio.page.keyboard.press("ArrowDown")
+    studio.page.keyboard.press("ArrowRight")
+    with studio.page.expect_response("**/api/route"):
+        studio.page.keyboard.press("Space")
+    studio.until("In B to Out 2, not connected", "ariaPressed", "false")
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    assert studio.page.evaluate(focused) == "In B to Out 2, not connected"
+    with studio.page.expect_response("**/api/route"):
+        studio.page.keyboard.press("Enter")
+    studio.until("In B to Out 2, connected", "ariaPressed", "true")
+    assert studio.unapplied().inner_text() == ""
+    # Only the focused cell is in the tab order.
+    assert studio.page.locator("#mixer .route[tabindex='0']").count() == 1
+
+
+def test_mixer_headers_show_nicknames_and_mutes(studio: Studio) -> None:
+    studio.name("In A", "Left")
+    studio.name("Out 2", "Sub L")
+    studio.field("Out 2 mute").click()
+    studio.until("Out 2 mute", "ariaPressed", "true")
+    mixer = _mixer(studio)
+    head = mixer.locator("thead th").nth(1)
+    assert head.locator(".mixer-name").inner_text() == "Sub L"
+    assert head.locator(".mixer-label").inner_text() == "Out 2"
+    assert head.locator(".mixer-mute").inner_text() == "M"
+    assert mixer.locator(".mixer-mute").count() == 1
+    assert mixer.locator("thead th").nth(2).locator(".mixer-name").inner_text() == ""
+    _route(studio, "Left to Sub L, not connected").wait_for()
+    _route(studio, "Left to Out 1, connected").wait_for()
+
+
+def test_a_staged_route_updates_the_tune_latency(studio: Studio) -> None:
+    studio.select("Out 3")
+    latency = studio.page.locator("#topbar .latency")
+    latency.get_by_text("latency 1.73 ms, no input routed").wait_for()
+    studio.field("In C delay in ms").fill("1")
+    with studio.page.expect_response("**/api/edit"):
+        studio.field("In C delay in ms").press("Enter")
+    _mixer(studio)
+    with studio.page.expect_response("**/api/route"):
+        _route(studio, "In C to Out 3, not connected").click()
+    studio.page.get_by_role("button", name="Tune", exact=True).click()
+    latency.get_by_text("latency 2.73 ms").wait_for()

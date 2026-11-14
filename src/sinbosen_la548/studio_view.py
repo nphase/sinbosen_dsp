@@ -336,10 +336,26 @@ def _selected_entry(view: ServiceView, notes: DeviceNotes, selected: tuple[bool,
             "latency": _latency(view.draft, selected, notes.nicknames.get(selected) or _channel_label(output, index))}
 
 
+def _mixer(view: ServiceView, notes: DeviceNotes, pending_keys: set[ControlKey]) -> dict[str, Any]:
+    """The routing matrix from the draft: a header per input and output and, per input, a cell per output."""
+    draft = view.draft
+
+    def header(ch: ChannelSettings) -> dict[str, Any]:
+        return {**_member(notes, ch.output, ch.channel_id), "muted": ch.base.muted}
+
+    matrix = draft.mix_matrix
+    return {"inputs": [header(ch) for ch in draft.inputs],
+            "outputs": [{**header(ch), "no_input": not any(row[ch.channel_id] for row in matrix)}
+                        for ch in draft.outputs],
+            "cells": [[{"on": on, "pending": ControlKey(False, i, "route", o) in pending_keys}
+                       for o, on in enumerate(row)] for i, row in enumerate(matrix)]}
+
+
 def build_state(view: ServiceView, notes: DeviceNotes, *, selected: tuple[bool, int], device: str | None,
                 phase: bool = False, group_delay: bool = False, each_filter: bool = True, on_device: bool = True,
                 live_errors: str = "", warning: str | None = None) -> dict[str, Any]:
-    """The whole screen as JSON-ready data: status, the channel strip, the selected channel and its plot."""
+    """The whole screen as JSON-ready data: status, the channel strip, the selected channel and its plot, and the
+    routing matrix."""
     pending: Sequence[Change] = view.pending
     pending_keys = {change.key for change in pending}
     channels = [_channel_entry(view, notes, output, i, selected, pending_keys)
@@ -353,4 +369,5 @@ def build_state(view: ServiceView, notes: DeviceNotes, *, selected: tuple[bool, 
         "selected": _selected_entry(view, notes, selected, pending_keys),
         "plot": _plot(view, selected, pending_keys, phase=phase, group_delay=group_delay, each_filter=each_filter,
                       on_device=on_device),
+        "mixer": _mixer(view, notes, pending_keys),
     }

@@ -771,3 +771,65 @@ def test_a_save_that_fails_after_apply_first_reports_the_apply_and_the_failure(s
 
 def test_a_plain_save_has_no_save_error(client: TestClient) -> None:
     assert post(client, "/api/programs/save", slot=0, name="user1")["save_error"] is None
+
+
+# Routing
+
+def test_a_route_toggle_is_staged_and_revert_clears_it(client: TestClient) -> None:
+    state = post(client, "/api/route", input=0, output=2, on=True)
+    assert state["mixer"]["cells"][0][2] == {"on": True, "pending": True}
+    assert state["status"]["pending_count"] == 1
+    state = post(client, "/api/route", input=0, output=0, on=False)
+    assert state["mixer"]["cells"][0][0] == {"on": False, "pending": True}
+    assert state["status"]["pending_count"] == 2
+    state = post(client, "/api/revert")
+    assert state["mixer"]["cells"][0][2] == {"on": False, "pending": False}
+    assert state["mixer"]["cells"][0][0] == {"on": True, "pending": False}
+    assert state["status"]["pending_count"] == 0
+
+
+def test_a_route_is_applied_by_apply(client: TestClient) -> None:
+    post(client, "/api/route", input=3, output=2, on=True)
+    state = post(client, "/api/apply")
+    assert state["mixer"]["cells"][3][2] == {"on": True, "pending": False}
+    assert state["status"]["pending_count"] == 0
+
+
+def test_a_route_ignores_links(client: TestClient) -> None:
+    post(client, "/api/link", id="in:0", letter=None)
+    post(client, "/api/link", id="in:1", letter="A")
+    post(client, "/api/link/sections", letter="A", sections=["crossover", "eq", "delay", "limiter"])
+    state = post(client, "/api/route", input=0, output=2, on=True)
+    assert state["mixer"]["cells"][1][2] == {"on": False, "pending": False}
+    assert state["status"]["pending_count"] == 1
+
+
+@pytest.mark.parametrize("body", [
+    {"input": 4, "output": 0, "on": True}, {"input": -1, "output": 0, "on": True},
+    {"input": 0, "output": 8, "on": True}, {"input": 0, "output": -1, "on": True},
+    {"input": "0", "output": 0, "on": True}, {"input": 0, "output": 1.0, "on": True},
+    {"input": True, "output": 0, "on": True}, {"output": 0, "on": True},
+    {"input": 0, "output": 2, "on": 1}, {"input": 0, "output": 2, "on": "true"}, {"input": 0, "output": 2},
+])
+def test_a_bad_route_is_refused_and_stages_nothing(client: TestClient, body: dict[str, Any]) -> None:
+    response = client.post("/api/route", json=body)
+    assert response.status_code == 400
+    assert response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def test_with_live_on_a_route_is_staged_then_sent_by_live(store: StudioStore) -> None:
+    device = FakeDevice()
+
+    def set_mix_route(source: int, target: int, on: bool, **kwargs: Any) -> None:
+        device.settings = replace_control(device.settings, ControlKey(False, source, "route", target), on)
+
+    device.client.set_mix_route.side_effect = set_mix_route
+    with connected(store, device) as client:
+        post(client, "/api/live", enabled=True)
+        state = post(client, "/api/route", input=0, output=2, on=True)
+        assert state["mixer"]["cells"][0][2] == {"on": True, "pending": True}
+        state = wait_for(client, lambda s: not s["status"]["pending_count"])
+    device.client.set_mix_route.assert_called_once_with(0, 2, True)
+    assert state["mixer"]["cells"][0][2] == {"on": True, "pending": False}
+    assert state["status"]["live_errors"] == ""

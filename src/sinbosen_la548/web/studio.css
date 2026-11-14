@@ -29,6 +29,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -436,3 +437,46 @@ select.field option { background: var(--panel); color: var(--text); }
 .slot-name.empty { color: var(--muted); font-style: italic; }
 .slot-current { margin-left: auto; padding-left: 12px; color: var(--ok); font-size: 11px; }
 .hint .message.notice { color: var(--ok); }
+
+/* The Mixer tab: a 4 x 8 routing grid, left-aligned, with 44 x 28 px toggles. */
+
+.mixer { display: flex; }
+.mixer-grid { border-collapse: separate; border-spacing: 4px; margin: -4px; }
+.mixer-grid th { padding: 0 2px; font-weight: 400; text-align: left; vertical-align: middle; }
+.mixer-grid thead th { width: 64px; max-width: 64px; text-align: center; vertical-align: bottom; }
+.mixer-grid tbody th { min-width: 104px; padding-right: 8px; }
+.mixer-row-head { display: flex; align-items: center; gap: 6px; }
+.mixer-grid td { padding: 0; text-align: center; vertical-align: middle; }
+.mixer-grid .mixer-corner { color: #5C6672; font-size: 11px; text-align: left; vertical-align: bottom; }
+.mixer-head { display: flex; flex-direction: column; min-width: 0; line-height: 15px; }
+.mixer-grid thead .mixer-head { align-items: center; }
+.mixer-name { max-width: 100%; min-height: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 700; }
+.mixer-label { color: var(--muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.mixer-label.only { color: var(--text-2); font-size: 12px; }
+.mixer-grid thead .mixer-label { color: var(--text-2); }
+.mixer-status { display: flex; justify-content: center; align-items: center; gap: 4px; height: 15px; }
+.mixer-mute {
+  padding: 0 3px;
+  border-radius: 2px;
+  background: var(--danger);
+  color: var(--on-danger);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 13px;
+}
+.mixer-none { color: var(--muted); font-size: 11px; font-style: italic; }
+.route {
+  display: block;
+  width: 44px;
+  height: 28px;
+  margin: 0 auto;
+  padding: 0;
+  border: 1px solid var(--control);
+  border-radius: 3px;
+  background: var(--bg);
+}
+.route:hover { background: var(--panel-selected); }
+.route.on { border-color: var(--accent); background: var(--accent); }
+.route.on:hover { background: #6BB4FF; }
+.route.pending { border-color: var(--pending); box-shadow: 0 0 0 1px var(--pending); }

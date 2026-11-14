@@ -196,8 +196,13 @@ measured figures in [docs/PROTOCOL.md](docs/PROTOCOL.md). A strip's
 nickname is edited by double-clicking it. Nicknames and links are kept in
 `~/.config/sinbosen-la548/studio.json` on this computer, not on the device.
 
-Not yet in the new UI, and available only with `--classic`: the mixer,
-loading programs, presets, measured traces and alignment, FIR coefficient
+The **Mixer** tab, next to Tune, shows the routing matrix: a row per input and a
+column per output, each crossing a toggle (the unit routes on or off, with no
+level). The strips stay above it. A routing change is a draft like a filter
+edit, shown unapplied until **Apply** (or sent by **Live**), so a stray click
+cannot send a full-range signal to a tweeter at once.
+
+Not yet in the new UI, and available only with `--classic`: loading programs, presets, measured traces and alignment, FIR coefficient
 backup/restore, and editing the limiter, compressor, FIR and the other
 advanced blocks.
 
