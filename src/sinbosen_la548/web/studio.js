@@ -3,9 +3,13 @@
 // page, so focus, caret and open dropdowns survive the once-a-second refresh.
 
 import { ApiError, getState, post } from "./api.js";
+import { createPlot } from "./plot.js";
 
 const POLL_MS = 1000;
-const HINT = "Gain, polarity and mute take effect immediately. Filters and delay wait for Apply.";
+const EDIT_INTERVAL_MS = 40;  // the most often a handle gesture posts /api/edit
+const HINT = "Gain, polarity and mute take effect immediately.";
+const HINT_DRAFT = "Filters and delay wait for Apply.";
+const HINT_LIVE = "Filters and delay are sent as you edit.";
 const SECTION_LABELS = { crossover: "Crossover", eq: "EQ", gain: "Gain", delay: "Delay", limiter: "Limiter" };
 // [option posted to /api/plot, label, the plot key present while the option is on]
 const PLOT_OPTIONS = [
@@ -31,12 +35,17 @@ const ui = {
   dismissed: new Set(),
   serverDown: null,
   menuBefore: null,    // the menu open before the current click
+  handle: null,        // {key, target, before, values, dragging}: a plot handle being dragged, wheeled or nudged
+  selectedCard: null,  // {channel, key}: the card whose handle was clicked
 };
 let fields = new Map();   // data-field -> field spec, rebuilt on every render
 let actions = new Map();  // data-action -> handler, rebuilt on every render
 let sequence = 0;
 let shown = 0;
 let busy = 0;
+let plot = null;
+// Values waiting to be posted, per handle key, so a gesture on another handle never drops the last one's.
+const handleEdits = { queued: new Map(), timer: null, flushing: false, last: 0, sent: false };
 
 // DOM building and patching
 
@@ -157,8 +166,8 @@ function show(number, data) {
 
 function report(result) {
   if (!result || result.ok) return;
-  const lines = [...result.errors];
-  if (result.conflicts.length) {
+  const lines = [...(result.errors ?? [])];
+  if (result.conflicts?.length) {
     lines.push(`Changed on the device since it was last read: ${result.conflicts.join(", ")}.`);
   }
   if (!lines.length && !result.verified) lines.push("The device did not confirm the write.");
@@ -190,7 +199,7 @@ async function send(path, body) {
 }
 
 async function poll() {
-  if (busy || document.hidden) return;
+  if (busy || ui.handle || document.hidden) return;
   const number = ++sequence;
   try {
     const data = await getState();
@@ -245,6 +254,96 @@ async function commit(el) {
     }
   }
 }
+
+// Plot handles. A gesture keeps its values in `ui.handle` so the handle and its card show them at once; they are
+// posted at most every EDIT_INTERVAL_MS, one request at a time so the server sees them in order, and the gesture ends
+// once the last one is answered.
+
+function targetOf(filter) {
+  return { id: state.selected.id, kind: filter.kind, ...(filter.kind === "eq" ? { index: filter.index } : {}) };
+}
+
+function queueHandleEdit(values) {
+  handleEdits.queued.set(ui.handle.key, { target: ui.handle.target, values });
+  if (handleEdits.flushing || handleEdits.timer) return;
+  const wait = Math.max(0, handleEdits.last + EDIT_INTERVAL_MS - performance.now());
+  handleEdits.timer = setTimeout(flushHandleEdits, wait);
+}
+
+async function flushHandleEdits() {
+  handleEdits.timer = null;
+  const [key, next] = handleEdits.queued.entries().next().value ?? [];
+  if (next) {
+    handleEdits.queued.delete(key);
+    handleEdits.flushing = true;
+    handleEdits.last = performance.now();
+    handleEdits.sent = true;
+    try {
+      await request("/api/edit", { ...next.target, values: next.values });
+    } catch (error) {
+      ui.errors.push(error instanceof ApiError ? error.message : String(error));
+    } finally {
+      handleEdits.flushing = false;
+    }
+  }
+  if (handleEdits.queued.size) {
+    handleEdits.timer = setTimeout(flushHandleEdits,
+      Math.max(0, handleEdits.last + EDIT_INTERVAL_MS - performance.now()));
+  } else if (ui.handle && !ui.handle.dragging) {
+    ui.handle = null;
+    render();
+  }
+}
+
+function startHandleEdit(key, before, dragging) {
+  const filter = state.selected.filters.find((f) => f.key === key);
+  if (ui.handle?.key !== key) {
+    ui.handle = { key, target: targetOf(filter), before, values: {}, dragging };
+    handleEdits.sent = false;
+  } else {
+    ui.handle.dragging = dragging;
+    ui.handle.before = before;
+  }
+}
+
+const plotHooks = {
+  begin(key, before) {
+    startHandleEdit(key, before, true);
+  },
+  change(key, values) {
+    ui.handle.values = { ...ui.handle.values, ...values };
+    queueHandleEdit(ui.handle.values);
+    render();
+  },
+  end(key, values) {
+    ui.handle.values = { ...ui.handle.values, ...values };
+    ui.handle.dragging = false;
+    queueHandleEdit(ui.handle.values);
+    render();
+  },
+  cancel() {
+    // One post puts back what the drag changed, replacing whatever was still waiting to be sent.
+    ui.handle.values = { ...ui.handle.values, ...ui.handle.before };
+    ui.handle.dragging = false;
+    if (handleEdits.sent) queueHandleEdit(ui.handle.before);
+    else handleEdits.queued.delete(ui.handle.key);
+    if (!handleEdits.flushing && !handleEdits.timer) flushHandleEdits();
+    render();
+  },
+  select(key) {
+    ui.handle = handleEdits.flushing || handleEdits.timer ? { ...ui.handle, dragging: false } : null;
+    ui.selectedCard = { channel: state.selected.id, key };
+    render();
+    document.querySelector(`[data-key="card:${CSS.escape(key)}"] .card-row :is(input, select):not(:disabled)`)
+      ?.focus();
+  },
+  nudge(key, values) {
+    if (ui.handle?.key !== key) startHandleEdit(key, null, false);
+    ui.handle.values = { ...ui.handle.values, ...values };
+    queueHandleEdit(ui.handle.values);
+    render();
+  },
+};
 
 function connect() {
   ui.connecting = true;
@@ -332,7 +431,7 @@ function standingErrors() {
 }
 
 function errorBar() {
-  const messages = [...standingErrors(), ...ui.errors];
+  const messages = [...new Set([...standingErrors(), ...ui.errors])];
   if (!messages.length) return [];
   return [
     h("ul", null, messages.map((message) => h("li", null, message))),
@@ -388,7 +487,8 @@ function strip(channel) {
 }
 
 function hint() {
-  return [h("span", null, HINT), h("span", { class: "message" }, state.status.message)];
+  return [h("span", null, `${HINT} ${state.status.live ? HINT_LIVE : HINT_DRAFT}`),
+    h("span", { class: "message" }, state.status.message)];
 }
 
 function selectedBar() {
@@ -435,8 +535,11 @@ function cardControl(filter, field, target) {
     }, field.options.map((o) => h("option", { value: String(o.value), selected: o.value === field.value }, o.label)));
   }
   const display = fieldDisplay[field.key] ?? String;
+  // A handle gesture shows its values here before the server has answered.
+  const edited = ui.handle?.key === filter.key ? ui.handle.values[field.key] : undefined;
   return textInput({
-    id: `${state.selected.id}:${filter.key}:${field.key}`, label: name, number: true, display: display(field.value),
+    id: `${state.selected.id}:${filter.key}:${field.key}`, label: name, number: true,
+    display: display(edited ?? field.value),
     pending: field.pending, disabled: !field.editable, parse: fieldParser[field.key] ?? numberParser(""),
     path: "/api/edit", body: (value) => ({ ...target, field: field.key, value }),
   });
@@ -444,9 +547,11 @@ function cardControl(filter, field, target) {
 
 function filterCard(filter) {
   const id = state.selected.id;
-  const target = { id, kind: filter.kind, ...(filter.kind === "eq" ? { index: filter.index } : {}) };
+  const target = targetOf(filter);
+  const selected = ui.selectedCard?.channel === id && ui.selectedCard.key === filter.key;
   return h("div", {
-    class: cls("card", filter.pending && "pending", !filter.enabled && "off"), "data-key": `card:${filter.key}`,
+    class: cls("card", filter.pending && "pending", !filter.enabled && "off", selected && "selected"),
+    "data-key": `card:${filter.key}`,
     role: "group", "aria-label": filter.title,
   },
   h("div", { class: "card-head" },
@@ -549,7 +654,8 @@ function overlay() {
     if (field) {
       const rect = field.getBoundingClientRect();
       items.push(h("div", { id: "field-error", class: "field-error", role: "alert",
-        style: `${below(field, 220)}; min-width: ${Math.round(rect.width)}px` }, typing.error));
+        style: `${below(field, 220)}; min-width: ${Math.round(rect.width)}px` },
+        `${typing.error.replace(/\.?$/, ".")} Esc to cancel`));
     }
   }
   return items;
@@ -568,6 +674,8 @@ function render() {
   patch("hint", hint());
   patch("selected-bar", selectedBar());
   patch("cards", cards());
+  plot ??= createPlot(document.getElementById("plot"), plotHooks);
+  plot.draw(state.plot, state.selected.filters, ui.handle);
   patch("overlay", overlay());
   if (ui.focusMenu) {
     ui.focusMenu = false;

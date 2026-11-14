@@ -8,7 +8,7 @@ import logging
 import math
 import threading
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -25,6 +25,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import links
 from .service import IMMEDIATE_BLOCKS, ApplyResult, ControlKey, DSPService, demo_settings
+from .settings import CrossoverSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import band_in_use, build_state
 from .tuning import TuningController
@@ -187,25 +188,40 @@ class _Studio:
                                                                {key: body.get("value")}))
 
     def edit(self, body: dict[str, Any]) -> None:
+        """One field (`field`, `value`) or several fields of the same block at once (`values`: {field: value})."""
         output, channel = self._channel(body)
-        kind, field, value = body.get("kind"), body.get("field"), body.get("value")
-        if not isinstance(field, str):
-            raise ValueError("field must be a string")
-        key: ControlKey
-        block: object
-        if kind == "delay":
-            if field != "delay_ms":
-                raise ValueError("unsupported delay field")
-            key, block = ControlKey(output, channel, "delay"), _number(value)
-        elif kind in ("hp", "lp"):
-            if not output:
-                raise ValueError("crossovers exist on outputs only")
-            key, block = self.tuning.crossover_edit(self.token, channel, kind, field, self._field_value(field, value))
-        elif kind == "eq":
-            key, block = self.tuning.eq_edit(self.token, output, channel, _index(body), field,
-                                             self._field_value(field, value))
-        else:
-            raise ValueError("kind must be delay, hp, lp or eq")
+        kind = body.get("kind")
+        values = body["values"] if "values" in body else {body.get("field"): body.get("value")}
+        if not isinstance(values, dict) or not values:
+            raise ValueError("values must be an object of field: value")
+        key: ControlKey | None = None
+        block: Any = None
+        edited: CrossoverSettings | EQBandSettings
+        for field, value in values.items():
+            if not isinstance(field, str):
+                raise ValueError("field must be a string")
+            if kind == "delay":
+                if field != "delay_ms":
+                    raise ValueError("unsupported delay field")
+                key, block = ControlKey(output, channel, "delay"), _number(value)
+                continue
+            if kind in ("hp", "lp"):
+                if not output:
+                    raise ValueError("crossovers exist on outputs only")
+                key, edited = self.tuning.crossover_edit(self.token, channel, kind, field,
+                                                         self._field_value(field, value))
+            elif kind == "eq":
+                key, edited = self.tuning.eq_edit(self.token, output, channel, _index(body), field,
+                                                  self._field_value(field, value))
+            else:
+                raise ValueError("kind must be delay, hp, lp or eq")
+            # Each field is checked against the draft on its own; what it changed is carried into the combined block.
+            draft_channel = self.tuning.channel(self.token, output, channel)
+            current = draft_channel.eq_bands[key.index] if kind == "eq" else getattr(draft_channel, kind)
+            block = replace(block if block is not None else edited, **{
+                f.name: getattr(edited, f.name) for f in fields(edited)
+                if getattr(edited, f.name) != getattr(current, f.name)})
+        assert key is not None
         draft = self.service.view(self.token).draft
         self.service.stage_many(self.token, links.expand(self.store.load(self.device_key).links, draft, {key: block}))
 

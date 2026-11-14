@@ -93,6 +93,31 @@ def test_edit_delay_and_crossover(client: TestClient) -> None:
     assert state["status"]["pending_count"] == 2
 
 
+def test_edit_takes_several_fields_of_one_block_at_once(client: TestClient) -> None:
+    post(client, "/api/select", id="out:0")
+    post(client, "/api/band/add", id="out:0")
+    post(client, "/api/apply")
+    state = post(client, "/api/edit", id="out:0", kind="eq", index=0, values={"freq_hz": 480, "gain_db": -4.0})
+    card = next(c for c in state["selected"]["filters"] if c["key"] == "eq:0")
+    assert {f["key"]: f["value"] for f in card["fields"] if f["key"] != "q"} == {"type": 0, "freq_hz": 480,
+                                                                                  "gain_db": -4.0}
+    assert state["status"]["pending_count"] == 1
+    state = post(client, "/api/edit", id="out:0", kind="hp", values={"freq_hz": 90, "enabled": True})
+    hp = next(c for c in state["selected"]["filters"] if c["key"] == "hp")
+    assert hp["enabled"] is True
+    assert next(f for f in hp["fields"] if f["key"] == "freq_hz")["value"] == 90
+
+
+@pytest.mark.parametrize("values", [{}, [], {"freq_hz": 480, "gain_db": 99}, {"freq_hz": 480, "bogus": 1}])
+def test_invalid_multi_field_edit_stages_nothing(client: TestClient, values: object) -> None:
+    post(client, "/api/band/add", id="out:0")
+    post(client, "/api/apply")
+    response = client.post("/api/edit", json={"id": "out:0", "kind": "eq", "index": 0, "values": values})
+    assert response.status_code == 400
+    assert response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
 @pytest.mark.parametrize("body", [
     {"id": "out:0", "kind": "eq", "index": 0, "field": "gain_db", "value": 99},
     {"id": "out:0", "kind": "eq", "index": 0, "field": "bogus", "value": 1},

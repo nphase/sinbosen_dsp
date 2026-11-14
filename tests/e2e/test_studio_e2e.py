@@ -6,6 +6,7 @@ posts to `/api/connect`. These fixtures are separate from the Gradio ones in con
 
 from __future__ import annotations
 
+import json
 import re
 import socket
 import threading
@@ -60,6 +61,26 @@ class Studio:
         """Wait until the element labelled `name` has `expected` in its DOM property `prop`."""
         self.page.wait_for_function("([name, prop, expected]) => document.querySelector("
                                     "`[aria-label=\"${name}\"]`)?.[prop] === expected", arg=[name, prop, expected])
+
+    def handles(self) -> Any:
+        return self.page.locator("#plot [role=slider]")
+
+    def handle(self, name: str) -> Any:
+        return self.page.locator("#plot").get_by_role("slider", name=name, exact=True)
+
+    def add_band(self) -> None:
+        """Select Out 3 and add one EQ band (1000 Hz, 0 dB, Q 1)."""
+        self.select("Out 3")
+        self.page.get_by_role("button", name=re.compile("^Add band")).click()
+        self.handle("EQ 1").wait_for()
+
+    def server_state(self) -> dict[str, Any]:
+        return dict(self.page.evaluate("fetch('/api/state').then(response => response.json())"))
+
+    def centre(self, locator: Any) -> tuple[float, float]:
+        box = locator.bounding_box()
+        assert box is not None
+        return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
 
 
 @pytest.fixture
@@ -163,6 +184,7 @@ def test_refused_entry_keeps_focus_and_shows_the_reason(studio: Studio) -> None:
     field.press("Enter")
     message = studio.page.locator(".field-error")
     message.get_by_text(re.compile("out of range")).wait_for()
+    assert message.inner_text().endswith("Esc to cancel")
     assert studio.border("High-pass frequency") == ERROR_BORDER
     assert field.evaluate("el => el === document.activeElement")
     assert studio.unapplied().inner_text() == ""
@@ -215,14 +237,245 @@ def test_link_menu_creates_and_joins_groups(studio: Studio) -> None:
     studio.until("Out 4 link", "textContent", "Link")
 
 
-def test_add_band_adds_a_card(studio: Studio) -> None:
+def test_add_band_adds_a_card_and_a_handle(studio: Studio) -> None:
     studio.select("Out 3")
     add = studio.page.get_by_role("button", name=re.compile("^Add band"))
     assert "0 of 15 used" in add.inner_text()
+    assert studio.handles().count() == 0
     add.click()
     studio.page.locator("#cards .card-title").get_by_text("EQ 1", exact=True).wait_for()
     assert "1 of 15 used" in add.inner_text()
     studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    studio.handle("EQ 1").wait_for()
+    assert studio.handles().count() == 1
+
+
+def test_plot_has_a_handle_per_enabled_crossover_and_band_in_use(studio: Studio) -> None:
+    studio.select("Out 3")
+    assert studio.page.locator("#plot svg").count() == 1
+    assert studio.handles().count() == 0
+    with studio.page.expect_response("**/api/edit"):
+        studio.page.get_by_role("group", name="High-pass").get_by_role("checkbox").check()
+    studio.handle("High-pass").wait_for()
+    assert studio.handle("High-pass").text_content() == "HP"
+    studio.page.get_by_role("button", name=re.compile("^Add band")).click()
+    studio.handle("EQ 1").wait_for()
+    assert studio.handle("EQ 1").text_content() == "1"
+    assert studio.handles().count() == 2
+    studio.select("In A")
+    assert studio.handles().count() == 0
+
+
+def test_dragging_an_eq_handle_left_lowers_its_frequency(studio: Studio) -> None:
+    studio.add_band()
+    studio.page.get_by_role("button", name="Apply", exact=True).click()
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for(state="detached")
+    hz = studio.field("EQ 1 frequency")
+    assert hz.input_value() == "1000"
+    assert studio.border("EQ 1 frequency") != PENDING_BORDER
+    x, y = studio.centre(studio.handle("EQ 1"))
+    mouse = studio.page.mouse
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x - 150, y, steps=10)
+    mouse.up()
+    studio.page.wait_for_function("() => Number(document.querySelector('[aria-label=\"EQ 1 frequency\"]').value) < 600")
+    studio.page.wait_for_function("() => getComputedStyle(document.querySelector("
+                                  "'[aria-label=\"EQ 1 frequency\"]')).borderTopColor === 'rgb(242, 163, 58)'")
+    studio.page.wait_for_timeout(300)
+    band = studio.server_state()["selected"]["filters"][2]
+    assert str(band["fields"][1]["value"]) == hz.input_value()
+    assert band["fields"][2]["value"] == 0  # moved sideways only: the gain is unchanged
+    handle_freq = studio.server_state()["plot"]["handles"][0]["freq_hz"]
+    assert handle_freq == int(hz.input_value())
+
+
+def test_dragging_up_raises_the_gain_and_crossovers_move_only_sideways(studio: Studio) -> None:
+    studio.add_band()
+    x, y = studio.centre(studio.handle("EQ 1"))
+    mouse = studio.page.mouse
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x, y - 52, steps=5)
+    mouse.up()
+    studio.page.wait_for_function("() => Number(document.querySelector('[aria-label=\"EQ 1 gain\"]').value) >= 9")
+    gain = float(studio.field("EQ 1 gain").input_value())
+    assert 9 <= gain <= 11
+    assert studio.field("EQ 1 frequency").input_value() == "1000"
+    with studio.page.expect_response("**/api/edit"):
+        studio.page.get_by_role("group", name="High-pass").get_by_role("checkbox").check()
+    x, y = studio.centre(studio.handle("High-pass"))
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x + 100, y + 60, steps=5)
+    mouse.up()
+    studio.page.wait_for_function("() => Number(document.querySelector("
+                                  "'[aria-label=\"High-pass frequency\"]').value) > 30")
+    studio.page.wait_for_timeout(300)
+    hp = studio.server_state()["selected"]["filters"][0]
+    assert hp["fields"][0]["value"] > 30
+
+
+def test_escape_during_a_drag_restores_the_value(studio: Studio) -> None:
+    studio.add_band()
+    x, y = studio.centre(studio.handle("EQ 1"))
+    mouse = studio.page.mouse
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x - 150, y - 30, steps=10)
+    studio.page.wait_for_function("() => Number(document.querySelector('[aria-label=\"EQ 1 frequency\"]').value) < 600")
+    edits = []
+    studio.page.on("request", lambda request: edits.append(request.post_data) if "/api/edit" in request.url else None)
+    studio.page.wait_for_timeout(200)
+    edits.clear()
+    studio.page.keyboard.press("Escape")
+    studio.page.wait_for_function("() => document.querySelector('[aria-label=\"EQ 1 frequency\"]').value === '1000'")
+    mouse.up()
+    studio.page.wait_for_timeout(300)
+    assert len(edits) == 1, edits
+    band = studio.server_state()["selected"]["filters"][2]
+    assert [band["fields"][1]["value"], band["fields"][2]["value"]] == [1000, 0]
+    assert studio.field("EQ 1 gain").input_value() == "0.0"
+
+
+def test_a_poll_does_not_move_a_handle_mid_drag(studio: Studio) -> None:
+    studio.add_band()
+    handle = studio.handle("EQ 1")
+    x, y = studio.centre(handle)
+    mouse = studio.page.mouse
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x - 120, y, steps=6)
+    studio.page.wait_for_timeout(200)
+    before = studio.centre(handle)
+    # Something else moves the band while the pointer is held; the polls that follow must not move the handle.
+    studio.page.evaluate("fetch('/api/edit', {method: 'POST', headers: {'Content-Type': 'application/json'},"
+                         "body: JSON.stringify({id: 'out:2', kind: 'eq', index: 0, field: 'freq_hz', value: 5000})})")
+    studio.page.wait_for_timeout(2200)
+    assert studio.centre(handle) == pytest.approx(before, abs=1)
+    mouse.up()
+
+
+def test_arrow_keys_move_a_focused_handle(studio: Studio) -> None:
+    studio.add_band()
+    handle = studio.handle("EQ 1")
+    handle.focus()
+    handle.press("ArrowLeft")
+    studio.until("EQ 1 frequency", "value", "972")  # 1000 Hz down 1/24 octave
+    handle.press("ArrowRight")
+    studio.until("EQ 1 frequency", "value", "1000")  # 972 Hz up 1/24 octave, rounded as drag_frequency does
+    handle.press("ArrowDown")
+    studio.until("EQ 1 gain", "value", "-0.1")
+    handle.press("Shift+ArrowUp")
+    studio.until("EQ 1 gain", "value", "+0.9")
+    assert handle.evaluate("el => el === document.activeElement")
+    studio.page.wait_for_timeout(300)
+    band = studio.server_state()["selected"]["filters"][2]
+    assert [band["fields"][1]["value"], band["fields"][2]["value"]] == [1000, pytest.approx(0.9)]
+
+
+def test_wheel_over_a_handle_changes_q_and_does_not_scroll(studio: Studio) -> None:
+    studio.add_band()
+    studio.page.evaluate("window.wheels = []; window.addEventListener('wheel', e => "
+                         "window.wheels.push(e.defaultPrevented), {passive: false})")
+    x, y = studio.centre(studio.handle("EQ 1"))
+    studio.page.mouse.move(x, y)
+    studio.page.mouse.wheel(0, -100)
+    studio.until("EQ 1 Q", "value", "1.05")
+    studio.page.mouse.wheel(0, 100)
+    studio.until("EQ 1 Q", "value", "1.00")
+    studio.page.mouse.move(x - 300, y + 60)
+    studio.page.mouse.wheel(0, 100)
+    studio.page.wait_for_function("() => window.wheels.length === 3")
+    assert studio.page.evaluate("window.wheels") == [True, True, False]
+
+
+def test_clicking_a_handle_selects_its_card(studio: Studio) -> None:
+    studio.add_band()
+    edits: list[str] = []
+    studio.page.on("request", lambda request: edits.append(request.url) if "/api/edit" in request.url else None)
+    studio.handle("EQ 1").click()
+    card = studio.page.get_by_role("group", name="EQ 1")
+    studio.page.wait_for_function("() => document.querySelector('[data-key=\"card:eq:0\"]')"
+                                  ".classList.contains('selected')")
+    assert card.evaluate("el => el.contains(document.activeElement)")
+    assert edits == []
+
+
+def test_phase_and_group_delay_panels_follow_their_ticks(studio: Studio) -> None:
+    studio.select("Out 3")
+    bar = studio.page.locator("#selected-bar")
+    panels = studio.page.locator("#plot [data-panel]")
+    assert panels.evaluate_all("els => els.map(e => e.dataset.panel)") == ["magnitude"]
+    with studio.page.expect_response("**/api/plot"):
+        bar.get_by_label("Phase", exact=True).check()
+    studio.page.locator("#plot [data-panel=phase]").wait_for()
+    with studio.page.expect_response("**/api/plot"):
+        bar.get_by_label("Group delay", exact=True).check()
+    studio.page.locator("#plot [data-panel=group-delay]").wait_for()
+    assert panels.evaluate_all("els => els.map(e => e.dataset.panel)") == ["magnitude", "phase", "group-delay"]
+    with studio.page.expect_response("**/api/plot"):
+        bar.get_by_label("Phase", exact=True).uncheck()
+    studio.page.locator("#plot [data-panel=phase]").wait_for(state="detached")
+    assert panels.evaluate_all("els => els.map(e => e.dataset.panel)") == ["magnitude", "group-delay"]
+
+
+def test_magnitude_range_grows_to_keep_a_boost_visible(studio: Studio) -> None:
+    studio.add_band()
+    labels = studio.page.locator("#plot [data-axis=db] text")
+    assert labels.first.text_content() == "+10"
+    gain = studio.field("EQ 1 gain")
+    gain.fill("15")
+    gain.press("Enter")
+    studio.page.wait_for_function("() => document.querySelector('#plot [data-axis=db] text').textContent === '+20'")
+    assert labels.last.text_content() == "−40"
+
+
+def test_typing_survives_polls(studio: Studio) -> None:
+    studio.select("Out 3")
+    field = studio.field("High-pass frequency")
+    field.click()
+    field.fill("")
+    field.type("15")
+    with studio.page.expect_response("**/api/state"):
+        pass
+    with studio.page.expect_response("**/api/state"):
+        pass
+    assert field.input_value() == "15"
+    assert field.evaluate("el => el === document.activeElement")
+    field.type("0")
+    assert field.input_value() == "150"
+
+
+def test_hint_says_filters_wait_for_apply_while_live_is_off(studio: Studio) -> None:
+    hint = studio.page.locator("#hint")
+    assert "Filters and delay wait for Apply." in hint.inner_text()
+
+
+def test_repeated_errors_are_listed_once(studio: Studio) -> None:
+    studio.select("Out 3")
+    studio.page.route("**/api/band/add", lambda route: route.fulfill(
+        status=400, content_type="application/json", body='{"error": "no free EQ band"}'))
+    add = studio.page.get_by_role("button", name=re.compile("^Add band"))
+    for _ in range(2):
+        with studio.page.expect_response("**/api/band/add"):
+            add.click()
+    studio.page.locator("#errors li").first.wait_for()
+    assert studio.page.locator("#errors li").all_inner_texts() == ["no free EQ band"]
+    studio.errors[:] = [e for e in studio.errors if "status of 400" not in e]
+
+
+def test_a_result_without_error_lists_is_reported(studio: Studio) -> None:
+    state = studio.server_state()
+
+    def answer(route: Any) -> None:
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({**state, "result": {"ok": False, "verified": False}}))
+
+    studio.page.route("**/api/now", answer)
+    with studio.page.expect_response("**/api/now"):
+        studio.field("Out 3 mute").click()
+    studio.page.locator("#errors").get_by_text("The device did not confirm the write.").wait_for()
 
 
 def test_no_request_leaves_loopback_and_inter_is_served(studio: Studio) -> None:
