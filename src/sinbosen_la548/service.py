@@ -110,6 +110,11 @@ def _semantic(value: object) -> object:
     return value
 
 
+def same_value(a: object, b: object) -> bool:
+    """True when two control values are equal ignoring the raw wire bytes."""
+    return _semantic(a) == _semantic(b)
+
+
 def validated_fir_coefficients(data: bytes) -> bytes:
     """Validate one complete DA0408X FIR coefficient block before any write."""
     if not isinstance(data, bytes) or len(data) != 2048:

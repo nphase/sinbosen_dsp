@@ -686,3 +686,13 @@ def test_demo_settings_moved_to_service_and_still_exported_by_ui():
     pytest.importorskip("gradio")
     from sinbosen_la548 import ui
     assert ui.demo_settings is demo_settings
+
+
+def test_same_value_compares_semantically() -> None:
+    from sinbosen_la548.service import same_value
+
+    band = controls(demo_settings())[ControlKey(True, 0, "eq", 0)]
+    assert same_value(band, replace(band))
+    assert not same_value(band, replace(band, gain_db=band.gain_db + 1))
+    assert same_value(1.5, 1.5)
+    assert not same_value(1.5, 2.0)
