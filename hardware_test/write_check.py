@@ -109,7 +109,14 @@ def candidates(settings: DeviceSettings, *, output: int = 7, route_input: int = 
     )
 
 
-def _attempt(client: Client, baseline: DeviceSettings, step: Step) -> StepResult:
+def _byte_diff(a: bytes, b: bytes) -> str:
+    offsets = [i for i, (x, y) in enumerate(zip(a, b, strict=False)) if x != y]
+    count = len(offsets) + abs(len(a) - len(b))
+    first = offsets[0] if offsets else min(len(a), len(b))
+    return f"{count} byte{'' if count == 1 else 's'} of the snapshot differ, first at offset {first}"
+
+
+def _attempt(client: Client, baseline: DeviceSettings, raw_before: bytes, step: Step) -> StepResult:
     try:
         expected = normalize_control(step.key, step.value)
         restore.write_control(client, step.key, step.value)
@@ -123,8 +130,11 @@ def _attempt(client: Client, baseline: DeviceSettings, step: Step) -> StepResult
         if changes(replace_control(baseline, step.key, expected), after):
             return StepResult(step, "wrong value", f"wrote {expected!r}, read back {controls(after)[step.key]!r}")
         restore.write_control(client, step.key, controls(baseline)[step.key])
-        if changes(baseline, client.read_settings()):
-            return StepResult(step, "error", "could not be undone")
+        # Compared as raw bytes, not decoded controls: a write that disturbed
+        # bytes no control decodes cannot be put back by any write we have.
+        raw = client.read_group()
+        if raw != raw_before:
+            return StepResult(step, "error", f"could not be undone: {_byte_diff(raw_before, raw)}")
     except Exception as exc:  # a dropped link or a refused write is a result, not a crash
         return StepResult(step, "error", str(exc) or type(exc).__name__)
     return StepResult(step, OK)
@@ -135,6 +145,9 @@ def run(client: Client, steps: Sequence[Step] | None = None, *, output: int = 7,
     if client.read_lock_state().locked:
         raise RuntimeError("the unit is locked; unlock it on the front panel and run again")
     raw_before = client.read_group()
+    if client.read_group() != raw_before:
+        raise RuntimeError("the unit's snapshot is not stable: two reads with no write between them differ, "
+                           "so a write could not be told from the unit changing on its own")
     if on_baseline is not None:
         on_baseline(raw_before)
     baseline = client.read_settings()
@@ -146,7 +159,13 @@ def run(client: Client, steps: Sequence[Step] | None = None, *, output: int = 7,
         for step in steps:
             # After a failure the unit's write behaviour is unknown: send nothing more.
             stopped = any(r.outcome != OK for r in results)
-            results.append(StepResult(step, NOT_RUN) if stopped else _attempt(client, baseline, step))
+            if stopped:
+                results.append(StepResult(step, NOT_RUN))
+                continue
+            try:
+                results.append(_attempt(client, baseline, raw_before, step))
+            except KeyboardInterrupt:
+                results.append(StepResult(step, "error", "interrupted"))
     finally:
         restore_error = ""
         try:
@@ -211,6 +230,11 @@ def main(argv: Sequence[str] | None = None, *,
     if not args.amps_off:
         print("Nothing was written. Turn the amplifiers off (or unplug the unit's outputs), then run again "
               "with --amps-off: the check briefly unmutes, re-routes and re-filters one output.", file=sys.stderr)
+        return 2
+
+    if args.backup.exists():
+        print(f"Nothing was written. {args.backup} already exists and may be the only record of how the unit "
+              "was before an earlier run. Move it away, or name another file with --backup.", file=sys.stderr)
         return 2
 
     def save(raw: bytes) -> None:

@@ -239,6 +239,8 @@ restore.
 Before the first write, the unit's raw snapshot is saved to
 `ignore/write-check-baseline.bin` (change it with `--backup`). If the run
 ends with code 2 after writing, that file is the record of how the unit was.
+The check will not overwrite an existing backup file: move the old one away
+or name another, so a second run can never replace the record of the first.
 
 This check establishes that a write is accepted and reads back. It does not
 establish what the setting does to the audio: filter shapes, delay and

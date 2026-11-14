@@ -30,13 +30,17 @@ class FakeUnit:
         self.locked = locked
         self.hook = hook
         self.writes: list[tuple[ControlKey, object]] = []
+        # Stands in for snapshot bytes no decoded control covers.
+        self.undecoded = b"\x00"
+        self.group_reads = 0
 
     def read_settings(self) -> DeviceSettings:
         return self.settings
 
     def read_group(self) -> bytes:
         # Changes exactly when a control's value does.
-        return repr([(key, _plain(value)) for key, value in controls(self.settings).items()]).encode()
+        self.group_reads += 1
+        return repr([(key, _plain(value)) for key, value in controls(self.settings).items()]).encode() + self.undecoded
 
     def read_lock_state(self) -> SimpleNamespace:
         return SimpleNamespace(locked=self.locked)
@@ -231,6 +235,45 @@ def test_markdown_says_when_the_unit_was_not_restored():
     assert "Settings restored: no." in text and "link down" in text
 
 
+def test_change_outside_the_decoded_controls_stops_the_run():
+    # The first write also flips a snapshot byte that no control decodes.
+    def hook(unit: FakeUnit, key: ControlKey, value: object) -> bool:
+        if len(unit.writes) == 1:
+            unit.undecoded = b"\x01"
+        return False
+
+    report = write_check.run(FakeUnit(hook=hook))
+    assert report.results[0].outcome == "error"
+    assert "could not be undone" in report.results[0].detail and "1 byte" in report.results[0].detail
+    assert report.results[1].outcome == "not run"
+    assert report.restored and not report.byte_identical and not report.passed
+
+
+def test_snapshot_that_changes_on_its_own_is_refused_before_any_write():
+    class Drifting(FakeUnit):
+        def read_group(self) -> bytes:
+            return super().read_group() + bytes([self.group_reads])
+
+    unit = Drifting()
+    with pytest.raises(RuntimeError, match="not stable"):
+        write_check.run(unit)
+    assert unit.writes == []
+
+
+def test_interrupt_mid_run_still_restores_and_reports():
+    def hook(unit: FakeUnit, key: ControlKey, value: object) -> bool:
+        if key.block == "delay" and len(unit.writes) == 7:
+            raise KeyboardInterrupt
+        return False
+
+    unit = FakeUnit(hook=hook)
+    before = unit.read_group()
+    report = write_check.run(unit)
+    assert report.results[3].outcome == "error" and "interrupted" in report.results[3].detail
+    assert report.results[4].outcome == "not run"
+    assert report.restored and unit.read_group() == before
+
+
 class _Connected:
     """Stands in for `Client(address)` used as a context manager."""
 
@@ -337,3 +380,13 @@ def test_main_explains_a_missing_usb_extra(tmp_path, capsys):
     err = capsys.readouterr().err
     assert code == 2
     assert "uv run --extra usb python -m hardware_test.write_check usb --amps-off" in err
+
+
+def test_main_refuses_to_overwrite_an_existing_backup(tmp_path, capsys):
+    backup = tmp_path / "b.bin"
+    backup.write_bytes(b"the only copy of an earlier run's state")
+    opened: list[str] = []
+    code = write_check.main(["usb", "--amps-off", "--backup", str(backup)], connect=_Connected(FakeUnit(), opened))
+    assert code == 2 and opened == []
+    assert backup.read_bytes() == b"the only copy of an earlier run's state"
+    assert str(backup) in capsys.readouterr().err
