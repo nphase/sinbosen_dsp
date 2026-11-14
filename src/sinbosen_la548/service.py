@@ -9,6 +9,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, fields, is_dataclass, replace
+from importlib.resources import files
 from typing import Any
 
 from . import codecs
@@ -25,7 +26,15 @@ from .settings import (
     FrequencyShifterSettings,
     InputSourceSettings,
     LimiterSettings,
+    decode_settings,
 )
+
+# Blocks that reach the device the moment they are edited, without the Apply step.
+IMMEDIATE_BLOCKS: frozenset[str] = frozenset({"gain", "polarity", "mute"})
+
+
+def demo_settings() -> DeviceSettings:
+    return decode_settings(files("sinbosen_la548").joinpath("data/demo_snapshot.bin").read_bytes())
 
 
 @dataclass(frozen=True, order=True)
@@ -672,6 +681,67 @@ class DSPService:
             state.due_at = None
             state.revision += 1
             result = ApplyResult(applied=applied, pending=tuple(c.key for c in remaining),
+                                 errors=tuple(errors), verified=verified)
+            state.message = result.summary
+            return result
+
+    def write_now(self, token: str, values: dict[ControlKey, object]) -> ApplyResult:
+        """Write gain/polarity/mute immediately, leaving every other pending edit untouched.
+
+        Always writes the requested value (no conflict check), verifies by readback, and never
+        counts these controls as unapplied. Live is left as it was.
+        """
+        with self._lock:
+            state = self._state(token)
+            for key in values:
+                if key.block not in IMMEDIATE_BLOCKS:
+                    raise ValueError(f"{key.label} is not an immediate control; stage it and Apply")
+            # Validate everything before any device call.
+            normalized = {key: normalize_control(key, value) for key, value in values.items()}
+            for key, value in normalized.items():
+                replace_control(state.draft, key, value)
+            if state.demo:
+                for key, value in normalized.items():
+                    state.baseline = replace_control(state.baseline, key, value)
+                    state.draft = replace_control(state.draft, key, value)
+                state.revision += 1
+                result = ApplyResult(applied=tuple(normalized), pending=tuple(c.key for c in changes(
+                    state.baseline, state.draft)), demo=True)
+                state.message = result.summary
+                return result
+            if not self._online(state) or self._client is None:
+                raise ConnectionError("device disconnected; reconnect before changing it")
+            client = self._client
+            if client.read_lock_state().locked:
+                raise PermissionError("device is locked; writes are disabled")
+            others = tuple(c for c in changes(state.baseline, state.draft) if c.key not in normalized)
+            errors: list[str] = []
+            failed: ControlKey | None = None
+            for key, value in normalized.items():
+                try:
+                    self._write(client, key, value)
+                except Exception as exc:
+                    errors.append(f"{key.label}: {exc}")
+                    failed = key
+                    break
+            verified = True
+            applied: tuple[ControlKey, ...] = ()
+            try:
+                readback = client.read_settings()
+                observed = controls(readback)
+                state.baseline = readback
+                draft = readback
+                for c in others:
+                    draft = replace_control(draft, c.key, c.after)
+                state.draft = draft
+                applied = tuple(k for k, v in normalized.items() if _semantic(observed[k]) == _semantic(v))
+                errors.extend(f"{k.label}: device reports {_semantic(observed[k])!r}, expected {_semantic(v)!r}"
+                              for k, v in normalized.items() if k not in applied and k != failed)
+            except Exception as exc:
+                verified = False
+                errors.append(f"Readback unavailable; writes are unverified: {exc}")
+            state.revision += 1
+            result = ApplyResult(applied=applied, pending=tuple(c.key for c in changes(state.baseline, state.draft)),
                                  errors=tuple(errors), verified=verified)
             state.message = result.summary
             return result

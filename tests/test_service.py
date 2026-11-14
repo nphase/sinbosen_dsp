@@ -9,7 +9,7 @@ import pytest
 
 from sinbosen_la548.client import Client, LockState
 from sinbosen_la548.protocol import Opcode
-from sinbosen_la548.service import ControlKey, DSPService, controls, normalize_control, replace_control
+from sinbosen_la548.service import ControlKey, DSPService, controls, demo_settings, normalize_control, replace_control
 from sinbosen_la548.settings import decode_settings
 
 
@@ -566,3 +566,123 @@ def test_apply_with_an_invalid_limiter_detection_type_sends_no_packets():
     with pytest.raises(ValueError, match="detection_type"):
         service.apply(token)
     assert transport.calls == []
+
+
+def test_write_now_writes_without_touching_other_pending_edits(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    delay, mute = ControlKey(True, 2, "delay"), ControlKey(True, 0, "mute")
+    service.stage(token, delay, 3)
+    revision = service.view(token).revision
+    result = service.write_now(token, {mute: True})
+    assert result.applied == (mute,) and result.pending == (delay,) and result.verified and not result.errors
+    assert device.writes == [(mute, True)]
+    device.client.set_mute.assert_called_once_with(0, True, output=True)
+    view = service.view(token)
+    assert [c.key for c in view.pending] == [delay]
+    assert view.baseline.outputs[0].base.muted and view.draft.outputs[0].base.muted
+    assert view.draft.outputs[2].base.delay_ms == 3 and view.baseline.outputs[2].base.delay_ms == 0
+    assert view.revision > revision
+
+
+def test_write_now_rejects_non_immediate_blocks_before_any_device_call(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    calls = list(device.client.mock_calls)
+    with pytest.raises(ValueError, match="delay"):
+        service.write_now(token, {ControlKey(True, 0, "mute"): True, ControlKey(True, 0, "delay"): 1.0})
+    assert device.client.mock_calls == calls and device.writes == []
+
+
+def test_write_now_writes_even_when_the_device_value_changed_elsewhere(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    key = ControlKey(True, 0, "gain")
+    device.settings = replace_control(device.settings, key, -9)
+    result = service.write_now(token, {key: -3})
+    assert result.applied == (key,) and not result.conflicts and not result.errors
+    assert device.writes == [(key, -3)]
+    assert service.view(token).baseline.outputs[0].base.gain_db == -3
+
+
+def test_write_now_refuses_a_locked_device(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    device.client.read_lock_state.return_value = LockState(True, "locked")
+    with pytest.raises(PermissionError, match="locked"):
+        service.write_now(token, {ControlKey(True, 0, "mute"): True})
+    assert device.writes == []
+    device.client.set_mute.assert_not_called()
+
+
+def test_write_now_failure_shows_the_device_value_and_keeps_other_drafts(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    delay, mute = ControlKey(True, 2, "delay"), ControlKey(True, 0, "mute")
+    service.stage(token, delay, 3)
+    device.client.set_mute.side_effect = TimeoutError("missing ACK")
+    result = service.write_now(token, {mute: True})
+    assert result.applied == () and result.pending == (delay,) and result.verified
+    assert any("missing ACK" in e for e in result.errors)
+    view = service.view(token)
+    assert not view.draft.outputs[0].base.muted and not view.baseline.outputs[0].base.muted
+    assert [c.key for c in view.pending] == [delay]
+
+
+def test_write_now_readback_mismatch_is_reported(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    key = ControlKey(True, 0, "gain")
+    device.client.set_volume.side_effect = lambda *args, **kwargs: None  # device ignores the write
+    result = service.write_now(token, {key: -6})
+    assert result.applied == () and len(result.errors) == 1 and key.label in result.errors[0]
+    view = service.view(token)
+    assert view.draft.outputs[0].base.gain_db == view.baseline.outputs[0].base.gain_db != -6
+    assert view.pending == ()
+
+
+def test_write_now_in_demo_changes_baseline_and_draft(rig):
+    service, token, device = rig
+    key = ControlKey(False, 1, "polarity")
+    result = service.write_now(token, {key: True})
+    assert result.demo and result.applied == (key,)
+    view = service.view(token)
+    assert view.baseline.inputs[1].base.inverted and view.draft.inputs[1].base.inverted
+    assert view.pending == () and not device.client.mock_calls
+
+
+def test_write_now_out_of_range_gain_is_refused(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    with pytest.raises(ValueError):
+        service.write_now(token, {ControlKey(True, 0, "gain"): 13.0})
+    assert device.writes == []
+    device.client.set_volume.assert_not_called()
+
+
+def test_write_now_offline_raises_and_leaves_state_unchanged(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    service.close()
+    before = service.view(token)
+    with pytest.raises(ConnectionError):
+        service.write_now(token, {ControlKey(True, 0, "mute"): True})
+    assert service.view(token) == before and device.writes == []
+
+
+def test_write_now_never_changes_live(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    service.set_live(token, True)
+    service.write_now(token, {ControlKey(True, 0, "mute"): True})
+    assert service.view(token).live
+
+
+def test_demo_settings_moved_to_service_and_still_exported_by_ui():
+    settings = demo_settings()
+    assert settings == decode_settings(Path(__file__).parent.parent.joinpath(
+        "src/sinbosen_la548/data/demo_snapshot.bin").read_bytes())
+    assert len(settings.inputs) == 4 and len(settings.outputs) == 8
+    pytest.importorskip("gradio")
+    from sinbosen_la548 import ui
+    assert ui.demo_settings is demo_settings

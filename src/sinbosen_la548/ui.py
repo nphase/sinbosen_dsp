@@ -20,8 +20,8 @@ from .exports import plot_archive
 from .measurements import Measurements, MeasurementUI
 from .plots import response_figure
 from .response import channel_response, frequency_grid
-from .service import ControlKey, DSPService, ServiceView
-from .settings import ChannelSettings, DeviceSettings, decode_settings
+from .service import ControlKey, DSPService, ServiceView, demo_settings
+from .settings import ChannelSettings, DeviceSettings
 from .tuning import ALLPASS_TYPES, EQ_TYPES, XOVER_TYPES, TuningController
 
 CSS = """
@@ -35,10 +35,6 @@ CSS = """
 .invalid-number input { border-color: #c53030 !important; box-shadow: 0 0 0 1px #c53030 !important; }
 .field-error { color: #b42318; font-size: 0.85rem; margin-top: -6px; }
 """
-
-
-def demo_settings() -> DeviceSettings:
-    return decode_settings(files("sinbosen_la548").joinpath("data/demo_snapshot.bin").read_bytes())
 
 
 def selected_channel(settings: DeviceSettings, selection: str) -> ChannelSettings:
