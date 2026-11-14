@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from .service import ControlKey, DSPService
-from .settings import ChannelSettings
+from .settings import ChannelSettings, CrossoverSettings, EQBandSettings
 
 EQ_TYPES = {0: "Parametric EQ", 1: "Low shelf", 2: "High shelf", 3: "Allpass (1st order)",
            4: "Allpass (2nd order)", 5: "Notch"}
@@ -32,8 +32,9 @@ class TuningController:
             raise ValueError("channel out of range")
         return channels[channel]
 
-    def eq(self, token: str, output: bool, channel: int, index: int, field: str, value: Any,
-           *, immediate: bool = False) -> None:
+    def eq_edit(self, token: str, output: bool, channel: int, index: int, field: str,
+                value: Any) -> tuple[ControlKey, EQBandSettings]:
+        """The band an EQ field edit would stage, without staging it."""
         ch = self.channel(token, output, channel)
         if not 0 <= index < len(ch.eq_bands):
             raise ValueError("EQ band out of range")
@@ -51,11 +52,16 @@ class TuningController:
                 updates["gain_db"] = 0.0
         if field == "gain_db" and band.type in ALLPASS_TYPES:
             raise ValueError("allpass gain is fixed; adjust frequency and Q")
-        self.service.stage(token, ControlKey(output, channel, "eq", index), replace(band, **updates),
-                           immediate=immediate)
+        return ControlKey(output, channel, "eq", index), replace(band, **updates)
 
-    def crossover(self, token: str, channel: int, band: str, field: str, value: Any,
-                  *, immediate: bool = False) -> None:
+    def eq(self, token: str, output: bool, channel: int, index: int, field: str, value: Any,
+           *, immediate: bool = False) -> None:
+        key, band = self.eq_edit(token, output, channel, index, field, value)
+        self.service.stage(token, key, band, immediate=immediate)
+
+    def crossover_edit(self, token: str, channel: int, band: str, field: str,
+                       value: Any) -> tuple[ControlKey, CrossoverSettings]:
+        """The crossover block a field edit would stage, without staging it."""
         if band not in {"hp", "lp"}:
             raise ValueError("unknown crossover band")
         ch = self.channel(token, True, channel)
@@ -66,8 +72,12 @@ class TuningController:
             raise ValueError("unsupported crossover field")
         if field != "enabled":
             value = int(value)
-        updates: dict[str, Any] = {field: value}
-        self.service.stage(token, ControlKey(True, channel, band), replace(block, **updates), immediate=immediate)
+        return ControlKey(True, channel, band), replace(block, **{field: value})
+
+    def crossover(self, token: str, channel: int, band: str, field: str, value: Any,
+                  *, immediate: bool = False) -> None:
+        key, block = self.crossover_edit(token, channel, band, field, value)
+        self.service.stage(token, key, block, immediate=immediate)
 
     def add_allpass(self, token: str, output: bool, channel: int) -> int:
         ch = self.channel(token, output, channel)

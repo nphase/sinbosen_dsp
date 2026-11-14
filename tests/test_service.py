@@ -48,6 +48,16 @@ def rig():
     return service, token, device
 
 
+def test_device_address_is_the_links_address_only_while_online(rig):
+    service, token, device = rig
+    device.client.address = "usb:ABC"
+    assert service.device_address(token) is None
+    service.connect(token, "usb")
+    assert service.device_address(token) == "usb:ABC"
+    service.close()
+    assert service.device_address(token) is None
+
+
 def test_connect_and_preview_do_not_write(rig):
     service, token, device = rig
     service.connect(token, "127.0.0.1")

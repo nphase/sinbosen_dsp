@@ -89,17 +89,21 @@ class Transport:
 
     def __init__(self, ip: str, port: int = DEFAULT_PORT, *, device_number: int = 0, version: int = 10):
         self._sock: socket.socket | usb.HidLink
+        # What the unit is called to a person: `usb:<serial>` for USB, else the address as given.
+        self.address: str
         if usb.parse_address(ip)[0]:
             # `port` has no meaning over USB. The link reports its own
             # address from recvfrom(), which is what _recv_loop filters on.
             self._sock = usb.open_link(ip)
             self._addr = (self._sock.address, 0)
+            self.address = self._sock.address
         else:
             # Resolve once, IPv4 to match AF_INET: the same address is both the
             # sendto() target and the source filter in _recv_loop, so a hostname
             # (or "localhost") must not be compared as text against reply IPs.
             self._addr = (socket.gethostbyname(ip), port)
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.address = ip
         self.device_number = device_number
         self.version = version
         self.quarantine_s = QUARANTINE_S

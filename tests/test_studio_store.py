@@ -91,18 +91,19 @@ def test_invalid_groups_are_dropped_individually(tmp_path: Path) -> None:
     path = tmp_path / "studio.json"
     write(path, {"version": 1, "devices": {"usb:1": {"nicknames": {}, "links": [
         raw_group("A", False, [0, 1]),                    # valid
-        raw_group("B", False, [2]),                       # fewer than 2 members
+        raw_group("B", False, [2]),                       # a one-member group is kept
+        raw_group("H", False, []),                        # an empty group is dropped
         raw_group("C", False, [3, 4], ["eq", "bogus"]),   # unknown section
         raw_group("D", False, [1, 5]),                    # channel 1 already in A (same side)
         raw_group("E", True, [1, 5]),                     # outputs are a separate side: valid
         raw_group("ab", False, [6, 7]),                   # bad letter
-        raw_group("F", False, [8, 8]),                    # duplicates collapse to one member
+        raw_group("F", False, [8, 8]),                    # duplicates collapse to one member, which is kept
         raw_group("G", False, [-1, 9]),                   # negative channel
         "junk",
     ]}}})
     store = StudioStore(path)
     notes = store.load("usb:1")
-    assert [g.letter for g in notes.links] == ["A", "E"]
+    assert [g.letter for g in notes.links] == ["A", "B", "E", "F"]
     assert store.warning is None
     assert not (tmp_path / "studio.json.bad").exists()
 
@@ -117,8 +118,8 @@ def test_members_are_sorted_and_unique(tmp_path: Path) -> None:
 def test_save_normalizes_members_and_drops_invalid_groups(tmp_path: Path) -> None:
     store = StudioStore(tmp_path / "studio.json")
     store.save("usb:1", DeviceNotes({}, (group("A", False, (2, 0, 2)), group("B", False, (1,)),
-                                         group("C", False, (0, 4)))))
-    assert store.load("usb:1").links == (group("A", False, (0, 2)),)
+                                         group("C", False, (0, 4)), group("D", False, ()))))
+    assert store.load("usb:1").links == (group("A", False, (0, 2)), group("B", False, (1,)))
 
 
 def test_nicknames_are_trimmed_capped_and_removed_when_empty(tmp_path: Path) -> None:

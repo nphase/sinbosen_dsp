@@ -913,3 +913,11 @@ def test_set_eq_band_defaults_gain_to_zero_for_both_allpass_types(allpass_type):
     client, fake = client_with_fake_transport()
     client.set_eq_band(0, 0, type=allpass_type, freq_hz=100, q=1.0, slope=0, enabled=True)
     assert fake.calls[0][1] == codecs.eq_struct.encode((100, 0.0, 1.0, 0, allpass_type, True))
+
+
+def test_address_is_the_transports_address():
+    transport = Transport("127.0.0.1", 8087)
+    transport._sock.close()
+    client = Client.__new__(Client)
+    client._transport = transport
+    assert client.address == "127.0.0.1"

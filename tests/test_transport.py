@@ -653,8 +653,15 @@ def test_usb_address_uses_a_hid_link_instead_of_a_socket(monkeypatch):
     finally:
         t.stop()
     assert opened == [" USB "]
+    assert t.address == "usb:6C61B7010730"
     request = protocol.encode_frame(Opcode.READ_LOCK_STATE)
     assert device.written == [b"\x00" + request.ljust(64, b"\x00")]
+
+
+def test_udp_transport_reports_the_address_as_given():
+    t = Transport("localhost", 8087)
+    t._sock.close()
+    assert t.address == "localhost"
 
 
 def test_hostname_starting_with_usb_still_resolves_as_a_network_host(monkeypatch):

@@ -164,6 +164,11 @@ class Client:
         self.close()
 
     @property
+    def address(self) -> str:
+        """`usb:<serial>` for a USB link, otherwise the address the client was created with."""
+        return self._transport.address
+
+    @property
     def link_up(self) -> bool:
         return self._transport.link_up
 

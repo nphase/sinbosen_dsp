@@ -1,0 +1,359 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import time
+import warnings
+from pathlib import Path
+from typing import Any
+from unittest.mock import Mock
+
+import pytest
+
+pytest.importorskip("starlette")
+pytest.importorskip("httpx")
+pytest.importorskip("scipy")
+
+with warnings.catch_warnings():
+    # Starlette's TestClient warns at import that it prefers httpx2 and uses a deprecated anyio alias.
+    warnings.simplefilter("ignore")
+    from starlette.testclient import TestClient
+
+from sinbosen_la548.client import Client, LockState  # noqa: E402
+from sinbosen_la548.service import ControlKey, DSPService, demo_settings, replace_control  # noqa: E402
+from sinbosen_la548.studio_app import create_studio_app  # noqa: E402
+from sinbosen_la548.studio_store import StudioStore  # noqa: E402
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> StudioStore:
+    return StudioStore(tmp_path / "studio.json")
+
+
+@pytest.fixture
+def client(store: StudioStore) -> Any:
+    with TestClient(create_studio_app(DSPService(demo_settings()), store=store)) as test_client:
+        yield test_client
+
+
+def post(client: TestClient, path: str, **body: Any) -> Any:
+    response = client.post(path, json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def channel(state: dict[str, Any], channel_id: str) -> dict[str, Any]:
+    return next(c for c in state["channels"] if c["id"] == channel_id)
+
+
+def test_state_after_start_is_the_demo(client: TestClient) -> None:
+    state = client.get("/api/state").json()
+    assert state["status"]["demo"] is True
+    assert state["status"]["connected"] is False
+    assert state["status"]["device"] is None
+    assert state["status"]["pending_count"] == 0
+    assert state["selected"]["id"] == "in:0"
+    assert len(state["channels"]) == 12
+
+
+def test_edit_eq_field_is_pending_and_revert_clears_it(client: TestClient) -> None:
+    post(client, "/api/select", id="out:0")
+    state = post(client, "/api/band/add", id="out:0")
+    assert state["selected"]["eq_used"] == 1
+    post(client, "/api/apply")
+    state = post(client, "/api/edit", id="out:0", kind="eq", index=0, field="gain_db", value=4.5)
+    assert state["status"]["pending_count"] == 1
+    card = next(c for c in state["selected"]["filters"] if c["key"] == "eq:0")
+    assert next(f for f in card["fields"] if f["key"] == "gain_db")["value"] == 4.5
+    assert card["pending"] is True
+    state = post(client, "/api/revert")
+    assert state["status"]["pending_count"] == 0
+    card = next(c for c in state["selected"]["filters"] if c["key"] == "eq:0")
+    assert next(f for f in card["fields"] if f["key"] == "gain_db")["value"] == 0
+
+
+def test_edit_delay_and_crossover(client: TestClient) -> None:
+    state = post(client, "/api/edit", id="out:2", kind="delay", field="delay_ms", value=1.5)
+    assert channel(state, "out:2")["delay_ms"] == 1.5
+    assert channel(state, "out:2")["delay_pending"] is True
+    post(client, "/api/select", id="out:2")
+    state = post(client, "/api/edit", id="out:2", kind="hp", field="freq_hz", value=80)
+    hp = next(c for c in state["selected"]["filters"] if c["key"] == "hp")
+    assert next(f for f in hp["fields"] if f["key"] == "freq_hz")["value"] == 80
+    assert state["status"]["pending_count"] == 2
+
+
+@pytest.mark.parametrize("body", [
+    {"id": "out:0", "kind": "eq", "index": 0, "field": "gain_db", "value": 99},
+    {"id": "out:0", "kind": "eq", "index": 0, "field": "bogus", "value": 1},
+    {"id": "out:0", "kind": "eq", "index": 99, "field": "gain_db", "value": 1},
+    {"id": "out:0", "kind": "eq", "index": 0, "field": "gain_db", "value": "loud"},
+    {"id": "out:0", "kind": "eq", "index": 0, "field": "enabled", "value": 1},
+    {"id": "out:0", "kind": "delay", "field": "gain_db", "value": 1},
+    {"id": "out:0", "kind": "delay", "field": "delay_ms", "value": 99999},
+    {"id": "out:0", "kind": "hp", "field": "freq_hz", "value": 5},
+    {"id": "in:0", "kind": "hp", "field": "freq_hz", "value": 80},
+    {"id": "out:0", "kind": "nope", "field": "freq_hz", "value": 80},
+    {"id": "out:99", "kind": "delay", "field": "delay_ms", "value": 1},
+    {"id": "out:0", "kind": "delay", "field": "delay_ms"},
+])
+def test_invalid_edit_is_400_with_message_and_stages_nothing(client: TestClient, body: dict[str, Any]) -> None:
+    response = client.post("/api/edit", json=body)
+    assert response.status_code == 400
+    assert response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def test_now_mute_changes_the_channel_without_pending(client: TestClient) -> None:
+    state = post(client, "/api/now", id="out:1", block="mute", value=True)
+    assert channel(state, "out:1")["muted"] is True
+    assert state["status"]["pending_count"] == 0
+
+
+def test_now_refuses_blocks_that_need_apply(client: TestClient) -> None:
+    response = client.post("/api/now", json={"id": "out:1", "block": "delay", "value": 1.0})
+    assert response.status_code == 400
+    assert "immediate" in response.json()["error"]
+
+
+def test_now_gain_follows_a_group_that_ties_gain(client: TestClient) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    post(client, "/api/link/sections", letter="A", sections=["gain"])
+    state = post(client, "/api/now", id="out:0", block="gain", value=-6.0)
+    assert channel(state, "out:0")["gain_db"] == -6.0
+    assert channel(state, "out:1")["gain_db"] == -6.0
+    assert state["status"]["pending_count"] == 0
+
+
+def test_linked_eq_edit_changes_both_members(client: TestClient) -> None:
+    post(client, "/api/link", id="out:3", letter=None)
+    state = post(client, "/api/link", id="out:4", letter="A")
+    assert channel(state, "out:4")["link"]["letter"] == "A"
+    state = post(client, "/api/edit", id="out:3", kind="eq", index=2, field="enabled", value=True)
+    assert state["status"]["pending_count"] == 2
+    state = post(client, "/api/select", id="out:4")
+    assert state["selected"]["eq_used"] == 1
+
+
+def test_link_across_input_and_output_is_400(client: TestClient) -> None:
+    post(client, "/api/link", id="in:0", letter=None)
+    response = client.post("/api/link", json={"id": "out:0", "letter": "A"})
+    assert response.status_code == 400
+    assert "inputs link only with inputs" in response.json()["error"]
+
+
+def test_link_unknown_letter_and_missing_fields_are_400(client: TestClient) -> None:
+    assert client.post("/api/link", json={"id": "out:0", "letter": "Q"}).status_code == 400
+    assert client.post("/api/link", json={"letter": None}).status_code == 400
+    assert client.post("/api/link", content=b"not json").status_code == 400
+
+
+def test_creating_a_group_adds_a_one_member_group(client: TestClient) -> None:
+    state = post(client, "/api/link", id="out:0", letter=None)
+    link = channel(state, "out:0")["link"]
+    assert (link["letter"], link["in_sync"]) == ("A", True)
+    assert state["selected"]["link"] is None  # in:0 is still selected
+    state = post(client, "/api/select", id="out:0")
+    assert state["selected"]["link"]["members"][0]["id"] == "out:0"
+
+
+def test_joining_takes_the_groups_values_from_the_pre_join_source(client: TestClient) -> None:
+    # Channel 0 joins group A whose source is channel 3; sorting members must not make the joiner the source.
+    post(client, "/api/link", id="out:3", letter=None)
+    post(client, "/api/edit", id="out:3", kind="delay", field="delay_ms", value=2.0)
+    post(client, "/api/edit", id="out:3", kind="eq", index=0, field="enabled", value=True)
+    post(client, "/api/edit", id="out:0", kind="eq", index=0, field="gain_db", value=3.0)
+    post(client, "/api/select", id="out:0")
+    state = post(client, "/api/link", id="out:0", letter="A")
+    eq0 = next(c for c in state["selected"]["filters"] if c["key"] == "eq:0")
+    assert eq0["enabled"] is True
+    assert next(f for f in eq0["fields"] if f["key"] == "gain_db")["value"] == 0
+    assert channel(state, "out:0")["link"]["in_sync"] is True
+
+
+def test_joining_a_group_that_ties_gain_writes_gain_now(client: TestClient) -> None:
+    post(client, "/api/link", id="out:3", letter=None)
+    post(client, "/api/link/sections", letter="A", sections=["gain"])
+    post(client, "/api/now", id="out:3", block="gain", value=-4.0)
+    state = post(client, "/api/link", id="out:5", letter="A")
+    assert channel(state, "out:5")["gain_db"] == -4.0
+    assert state["status"]["pending_count"] == 0
+
+
+def test_link_sections_can_be_changed(client: TestClient) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    post(client, "/api/select", id="out:0")
+    state = post(client, "/api/link/sections", letter="A", sections=["eq", "delay"])
+    assert [s for s, on in state["selected"]["link"]["sections"].items() if on] == ["eq", "delay"]
+    assert client.post("/api/link/sections", json={"letter": "Q", "sections": []}).status_code == 400
+    assert client.post("/api/link/sections", json={"letter": "A", "sections": ["bogus"]}).status_code == 400
+    assert client.post("/api/link/sections", json={"letter": "A", "sections": "eq"}).status_code == 400
+
+
+def test_sync_stages_the_source_members_tied_sections(client: TestClient) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    post(client, "/api/link", id="out:2", letter="A")
+    post(client, "/api/link/sections", letter="A", sections=[])
+    post(client, "/api/edit", id="out:2", kind="delay", field="delay_ms", value=5.0)
+    post(client, "/api/apply")
+    post(client, "/api/link/sections", letter="A", sections=["delay"])
+    state = post(client, "/api/link/sync", letter="A", **{"from": "out:2"})
+    assert [channel(state, f"out:{i}")["delay_ms"] for i in range(3)] == [5.0, 5.0, 5.0]
+    assert state["status"]["pending_count"] == 2
+    assert client.post("/api/link/sync", json={"letter": "A", "from": "out:7"}).status_code == 400
+    assert client.post("/api/link/sync", json={"letter": "Q", "from": "out:2"}).status_code == 400
+
+
+def test_unlink_removes_the_channel_from_its_group(client: TestClient) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    state = post(client, "/api/unlink", id="out:1")
+    assert channel(state, "out:1")["link"] is None
+
+
+def test_band_add_then_remove_round_trips_eq_used(client: TestClient) -> None:
+    post(client, "/api/select", id="out:0")
+    state = post(client, "/api/band/add", id="out:0")
+    assert state["selected"]["eq_used"] == 1
+    card = state["selected"]["filters"][-1]
+    assert card["enabled"] is True
+    fields = {f["key"]: f["value"] for f in card["fields"]}
+    assert (fields["type"], fields["freq_hz"], fields["gain_db"], round(fields["q"], 2)) == (0, 1000, 0, 1.0)
+    state = post(client, "/api/band/add", id="out:0")
+    assert state["selected"]["eq_used"] == 2
+    state = post(client, "/api/band/remove", id="out:0", index=0)
+    assert state["selected"]["eq_used"] == 1
+    state = post(client, "/api/band/remove", id="out:0", index=1)
+    assert state["selected"]["eq_used"] == 0
+
+
+def test_band_add_with_no_free_slot_and_bad_remove_are_400(client: TestClient) -> None:
+    for _ in range(7):
+        post(client, "/api/band/add", id="in:0")
+    response = client.post("/api/band/add", json={"id": "in:0"})
+    assert response.status_code == 400
+    assert client.post("/api/band/remove", json={"id": "in:0", "index": 7}).status_code == 400
+    assert client.post("/api/band/remove", json={"id": "in:0"}).status_code == 400
+
+
+def test_nickname_persists_across_a_new_app_instance(store: StudioStore) -> None:
+    with TestClient(create_studio_app(DSPService(demo_settings()), store=store)) as first:
+        state = post(first, "/api/nickname", id="out:2", name="  Tweeter ")
+        assert channel(state, "out:2")["nickname"] == "Tweeter"
+    assert "demo" in json.loads(store.path.read_text())["devices"]
+    with TestClient(create_studio_app(DSPService(demo_settings()), store=StudioStore(store.path))) as second:
+        assert channel(second.get("/api/state").json(), "out:2")["nickname"] == "Tweeter"
+        state = post(second, "/api/nickname", id="out:2", name="")
+        assert channel(state, "out:2")["nickname"] == ""
+
+
+def test_plot_options_and_select_shape_the_state(client: TestClient) -> None:
+    state = post(client, "/api/select", id="out:5")
+    assert state["selected"]["id"] == "out:5"
+    assert channel(state, "out:5")["selected"] is True
+    before = client.get("/api/state").json()["plot"]
+    after = post(client, "/api/plot", phase=True, each_filter=False)["plot"]
+    assert before != after
+    assert client.post("/api/plot", json={"phase": "yes"}).status_code == 400
+    assert client.post("/api/select", json={"id": "sideways"}).status_code == 400
+
+
+def test_live_flushes_edits_in_the_background(client: TestClient) -> None:
+    state = post(client, "/api/live", enabled=True)
+    assert state["status"]["live"] is True
+    post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+    deadline = time.monotonic() + 3
+    state = client.get("/api/state").json()
+    while state["status"]["pending_count"] and time.monotonic() < deadline:
+        time.sleep(0.1)
+        state = client.get("/api/state").json()
+    assert state["status"]["pending_count"] == 0
+    assert channel(state, "out:0")["delay_ms"] == 1.0
+
+
+def test_apply_and_demo_reset(client: TestClient) -> None:
+    post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+    state = post(client, "/api/apply")
+    assert state["status"]["pending_count"] == 0
+    state = post(client, "/api/demo")
+    assert channel(state, "out:0")["delay_ms"] == 0
+    assert post(client, "/api/refresh")["status"]["demo"] is True
+
+
+def test_connection_error_becomes_a_503_json_error(store: StudioStore) -> None:
+    def refuse(address: str) -> Client:
+        raise ConnectionError(f"no unit at {address}")
+
+    with TestClient(create_studio_app(DSPService(demo_settings(), client_factory=refuse), store=store)) as client:
+        response = client.post("/api/connect", json={"address": "10.1.2.3"})
+        assert response.status_code == 503
+        assert response.json() == {"error": "no unit at 10.1.2.3"}
+        assert client.get("/api/state").json()["status"]["demo"] is True
+
+
+def test_other_errors_map_to_400_and_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = client.app.state.service
+    for error, status in [(PermissionError("locked"), 400), (TimeoutError("slow"), 503), (OSError("io"), 503),
+                          (RuntimeError("usb needs hidapi"), 503), (ValueError("bad"), 400)]:
+        monkeypatch.setattr(service, "refresh", Mock(side_effect=error))
+        response = client.post("/api/refresh")
+        assert response.status_code == status
+        assert response.json() == {"error": str(error)}
+    assert client.post("/api/connect", json={}).status_code == 400
+    assert client.post("/api/connect", json={"address": "  "}).status_code == 400
+
+
+class FakeDevice:
+    def __init__(self) -> None:
+        self.settings = demo_settings()
+        self.client = Mock(spec=Client)
+        self.client.link_up = True
+        self.client.address = "usb:ABC123"
+        self.client.read_settings.side_effect = lambda: self.settings
+        self.client.read_lock_state.return_value = LockState(False, "")
+        self.writes: list[tuple[str, int, object]] = []
+
+        def set_mute(channel: int, muted: bool, *, output: bool = False, **kwargs: Any) -> None:
+            self.writes.append(("mute", channel, muted))
+            self.settings = replace_control(self.settings, ControlKey(output, channel, "mute"), muted)
+
+        self.client.set_mute.side_effect = set_mute
+
+
+def test_connected_device_key_is_the_links_address_and_writes_go_to_the_fake(store: StudioStore) -> None:
+    device = FakeDevice()
+    service = DSPService(demo_settings(), client_factory=lambda address: device.client)
+    with TestClient(create_studio_app(service, store=store)) as client:
+        state = post(client, "/api/connect", address="usb")
+        assert state["status"]["connected"] is True
+        assert state["status"]["device"] == "usb:ABC123"
+        state = post(client, "/api/now", id="out:1", block="mute", value=True)
+        assert device.writes == [("mute", 1, True)]
+        assert channel(state, "out:1")["muted"] is True
+        post(client, "/api/nickname", id="out:1", name="Sub")
+        assert list(json.loads(store.path.read_text())["devices"]) == ["usb:ABC123"]
+        state = post(client, "/api/disconnect")
+        assert state["status"]["demo"] is True
+        assert channel(state, "out:1")["nickname"] == ""
+    assert device.client.close.called
+
+
+def test_root_serves_the_page_and_static_files(client: TestClient) -> None:
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert 'id="app"' in response.text
+    assert client.get("/static/index.html").status_code == 200
+    assert client.get("/static/nope.js").status_code == 404
+
+
+def test_the_app_does_not_import_gradio_or_plotly() -> None:
+    code = ("import sys; import sinbosen_la548.studio_app; "
+            "bad = [m for m in sys.modules if m.split('.')[0] in ('gradio', 'plotly')]; "
+            "sys.exit(f'imported: {bad}' if bad else 0)")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

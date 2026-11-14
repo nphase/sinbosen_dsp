@@ -352,6 +352,11 @@ class DSPService:
             return ServiceView(state.baseline, state.draft, changes(state.baseline, state.draft), state.demo,
                                connected, state.live, state.revision, state.message)
 
+    def device_address(self, token: str) -> str | None:
+        """The connected unit's address (`usb:<serial>` for USB), or None while offline."""
+        with self._lock:
+            return self._client.address if self._online(self._state(token)) and self._client is not None else None
+
     def close(self) -> None:
         with self._lock:
             if self._client is not None:

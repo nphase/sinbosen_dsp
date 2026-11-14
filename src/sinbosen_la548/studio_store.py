@@ -64,7 +64,7 @@ def _clean_links(groups: list[LinkGroup]) -> tuple[LinkGroup, ...]:
     for group in groups:
         members = tuple(sorted(set(group.members)))
         claimed = {(group.output, channel) for channel in members}
-        if (group.letter not in _LETTERS or len(members) < 2 or any(channel < 0 for channel in members)
+        if (group.letter not in _LETTERS or not members or any(channel < 0 for channel in members)
                 or not group.sections <= set(SECTIONS) or claimed & taken):
             continue
         taken |= claimed
