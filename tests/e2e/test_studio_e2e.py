@@ -6,6 +6,7 @@ posts to `/api/connect`. These fixtures are separate from the Gradio ones in con
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import socket
@@ -439,15 +440,90 @@ def test_phase_and_group_delay_panels_follow_their_ticks(studio: Studio) -> None
     assert panels.evaluate_all("els => els.map(e => e.dataset.panel)") == ["magnitude", "group-delay"]
 
 
-def test_magnitude_range_grows_to_keep_a_boost_visible(studio: Studio) -> None:
+def _db_labels(studio: Studio) -> list[float]:
+    texts = studio.page.locator("#plot [data-axis=db] text").all_text_contents()
+    return [float(t.replace("−", "-")) for t in texts]
+
+
+def _set_channel_gain(studio: Studio, label: str, db: float) -> None:
+    gain = studio.field(f"{label} gain in dB")
+    gain.fill(str(db))
+    with studio.page.expect_response("**/api/now"):
+        gain.press("Enter")
+
+
+def _steep_high_pass(studio: Studio) -> None:
+    """Out 3 at -10 dB with a 140 Hz Linkwitz-Riley 24 dB/oct high-pass: its skirt falls far below -40 dB."""
+    studio.select("Out 3")
+    _set_channel_gain(studio, "Out 3", -10)
+    with studio.page.expect_response("**/api/edit"):
+        studio.page.get_by_role("group", name="High-pass").get_by_role("checkbox").check()
+    hz = studio.field("High-pass frequency")
+    hz.fill("140")
+    with studio.page.expect_response("**/api/edit"):
+        hz.press("Enter")
+    with studio.page.expect_response("**/api/edit"):
+        studio.field("High-pass family").select_option("1")
+    with studio.page.expect_response("**/api/edit"):
+        studio.field("High-pass slope").select_option("24")
+    hp = studio.server_state()["selected"]["filters"][0]
+    assert [f["value"] for f in hp["fields"]] == [140, 1, 24]
+    assert min(v for v in studio.server_state()["plot"]["draft_db"] if v is not None) < -60
+
+
+def test_a_steep_high_pass_does_not_stretch_the_range(studio: Studio) -> None:
+    _steep_high_pass(studio)
+    studio.page.wait_for_timeout(200)
+    labels = _db_labels(studio)
+    assert (labels[0], labels[-1]) == (10, -40)
+
+
+def test_a_handle_on_a_quiet_channel_stays_10_db_above_the_bottom(studio: Studio) -> None:
     studio.add_band()
-    labels = studio.page.locator("#plot [data-axis=db] text")
-    assert labels.first.text_content() == "+10"
+    _set_channel_gain(studio, "Out 3", -50)
+    handle_db = studio.server_state()["plot"]["handles"][0]["db"]
+    assert handle_db == pytest.approx(-50, abs=0.5)
+    studio.page.wait_for_function("() => [...document.querySelectorAll('#plot [data-axis=db] text')].at(-1)"
+                                  ".textContent !== '−40'")
+    labels = _db_labels(studio)
+    assert labels[-1] <= handle_db - 10
+    assert labels[-1] == -60
+    assert labels[0] == 10
+
+
+def test_a_peak_raises_the_top(studio: Studio) -> None:
+    studio.add_band()
+    assert _db_labels(studio)[0] == 10
     gain = studio.field("EQ 1 gain")
-    gain.fill("15")
+    gain.fill("18")
     gain.press("Enter")
     studio.page.wait_for_function("() => document.querySelector('#plot [data-axis=db] text').textContent === '+20'")
-    assert labels.last.text_content() == "−40"
+    assert _db_labels(studio)[-1] == -40
+
+
+def test_curves_leaving_the_range_are_clipped_at_the_plot_border(studio: Studio) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    _steep_high_pass(studio)
+    studio.page.mouse.move(0, 0)
+    studio.page.wait_for_timeout(200)
+    plot = studio.page.locator("#plot")
+    origin = plot.bounding_box()
+    frame = studio.page.locator("#plot [data-panel=magnitude] .frame").bounding_box()
+    assert origin is not None and frame is not None
+    scale = studio.page.evaluate("devicePixelRatio")
+    image = image_module.open(io.BytesIO(plot.screenshot())).convert("RGB")
+    left, top = (frame["x"] - origin["x"] - 2) * scale, (frame["y"] - origin["y"] - 2) * scale
+    right = (frame["x"] + frame["width"] - origin["x"] + 2) * scale
+    bottom = (frame["y"] + frame["height"] - origin["y"] + 2) * scale
+    outside = []
+    for x in range(image.width):
+        for y in range(image.height):
+            if left <= x <= right and top <= y <= bottom:
+                continue
+            r, g, b = image.getpixel((x, y))
+            if b > 180 and r < 130 and 110 < g < 200:  # the accent blue of the draft curve
+                outside.append((x, y))
+    assert not outside, outside[:10]
 
 
 def test_typing_survives_polls(studio: Studio) -> None:

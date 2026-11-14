@@ -17,8 +17,9 @@ const TOP = 8;
 const LOW_HZ = 20;
 const DECADES = 3;  // 20 Hz to 20 kHz
 const DB_STEP = 10;
-// Far beyond these the curve is a crossover skirt falling forever; it is clipped rather than squeezing the plot.
+const DB_DEFAULT = [-40, 10];
 const DB_LIMITS = [-80, 30];
+const HANDLE_FLOOR_DB = 10;  // the least room kept between a handle and the bottom edge
 const FREQ_LABELS = [[20, "20"], [50, "50"], [100, "100"], [200, "200"], [500, "500"], [1000, "1k"], [2000, "2k"],
   [5000, "5k"], [10000, "10k"], [20000, "20k"]];
 const MINOR_HZ = [50, 200, 500, 2000, 5000];
@@ -59,14 +60,20 @@ function finite(...series) {
   return series.flatMap((values) => (values ?? []).filter((v) => v !== null && Number.isFinite(v)));
 }
 
-// +10 to -40 dB, widened in 10 dB steps while the draft or device curve leaves it (up to DB_LIMITS).
+// The magnitude range, in 10 dB steps: +10 to -40 dB (the mockup's) unless something the user works with would not
+// fit. The top rises to the highest point of the draft or device curve and every handle (at most +30). The bottom
+// drops only to keep every handle, and both curves' level at each handle, at least 10 dB above it (at most -80).
+// A crossover's rolloff heads to minus infinity, so the curves alone never lower the bottom: below it they are clipped.
 export function magnitudeRange(plot) {
-  const values = finite(plot.draft_db, plot.device_db);
-  const high = values.length ? Math.max(...values) : 0;
-  const low = values.length ? Math.min(...values) : 0;
+  const levels = finite(plot.handles.flatMap((h) => {
+    const i = plot.freq.indexOf(h.freq_hz);
+    return [h.db, i >= 0 ? plot.draft_db[i] : null, i >= 0 ? plot.device_db?.[i] : null];
+  }));
+  const high = Math.max(...finite(plot.draft_db, plot.device_db), ...levels);
+  const low = Math.min(...levels);
   return [
-    Math.max(DB_LIMITS[0], Math.min(-40, Math.floor(low / DB_STEP) * DB_STEP)),
-    Math.min(DB_LIMITS[1], Math.max(10, Math.ceil(high / DB_STEP) * DB_STEP)),
+    clamp(Math.floor((low - HANDLE_FLOOR_DB) / DB_STEP) * DB_STEP, [DB_LIMITS[0], DB_DEFAULT[0]]),
+    clamp(Math.ceil(high / DB_STEP) * DB_STEP, [DB_DEFAULT[1], DB_LIMITS[1]]),
   ];
 }
 
@@ -200,8 +207,8 @@ export function createPlot(container, hooks) {
   svg.append(panels, handleLayer);
   container.replaceChildren(svg);
 
-  let current = null;  // {plot, filters, edit, y, scale}: what was drawn last
-  let drag = null;     // {key, pointerId, start: {x, y}, values0, values, moved, scale}
+  let current = null;  // {plot, filters, edit, range, scale}: what was drawn last
+  let drag = null;     // {key, pointerId, start: {x, y}, values0, values, moved, scale, range}
 
   // The values a handle stands for: the state's, with the gesture in progress laid over them.
   function valuesOf(key) {
@@ -250,7 +257,8 @@ export function createPlot(container, hooks) {
     const handle = current.plot.handles.find((h) => h.key === key);
     const values0 = valuesOf(key);
     drag = { key, pointerId: event.pointerId, start: point(event), client: [event.clientX, event.clientY], values0,
-      values: null, moved: false, hasGain: handle.has_gain && values0.gain_db !== undefined, scale: current.scale };
+      values: null, moved: false, hasGain: handle.has_gain && values0.gain_db !== undefined, scale: current.scale,
+      range: current.range };
     el.setPointerCapture(event.pointerId);
     const before = { freq_hz: values0.freq_hz };
     if (drag.hasGain) before.gain_db = values0.gain_db;
@@ -354,10 +362,11 @@ export function createPlot(container, hooks) {
   }
 
   function draw(plot, filters, edit) {
-    const range = magnitudeRange(plot);
+    // The range holds still while a handle is dragged, so the handle stays under the pointer.
+    const range = drag?.range ?? magnitudeRange(plot);
     const labels = new Map(plot.handles.map((h) => [h.key, h.label]));
     const magnitude = magnitudePanel(plot, range, labels);
-    current = { plot, filters, edit, scale: MAG_HEIGHT / (range[1] - range[0]) };
+    current = { plot, filters, edit, range, scale: MAG_HEIGHT / (range[1] - range[0]) };
     const list = [{ name: "magnitude", height: magnitude.height, content: magnitude.content }];
     if (plot.phase_deg) {
       list.push(lowerPanel("phase", "Phase (°)", plot.freq, plot.phase_deg, [-180, 180, 90],
