@@ -1,20 +1,154 @@
 # LA548 DSP Studio
 
-## Install and launch
+`sinbosen-la548-ui` starts the new Tune screen. The older Gradio UI is still
+there behind `--classic` and is documented under "Classic UI" below, after the
+new screen.
+
+The new screen has only been exercised in offline demo and against fakes in
+tests. It has not been checked on a real unit.
+
+## Tune screen
+
+### Launch
+
+```sh
+uv sync --extra ui
+uv run --extra ui sinbosen-la548-ui
+```
+
+Open the URL it prints, <http://127.0.0.1:7860> by default. `--port` changes
+the port. `--demo` is accepted but the app always starts in offline demo, using
+the bundled fixture. Ctrl-C stops it and closes the device connection.
+
+The server binds to `127.0.0.1`. It only accepts requests whose Host is a
+loopback name (or the one given to `--host`), refuses requests carrying another
+site's Origin, requires POSTs to be JSON, and sends no CORS headers, so a page
+on another site cannot drive it. Fonts, scripts and styles are served from the
+package; the page fetches nothing from the network. `--host` binds another
+address, which makes the UI reachable from the network; it has no
+authentication and can change the device's output levels, so the launcher
+prints a warning.
+
+### Layout
+
+- **Top bar.** The connection chip shows `USB` or the unit's address and its
+  state ("Offline demo", "Not connected"); clicking it opens the connect box
+  (an IP address, `usb` or `usb:<serial>`) and an **Offline demo** button. Then
+  the Tune tab, the **Live** toggle, the count of unapplied changes, **Revert**
+  and **Apply**.
+- **Channel strips.** All 4 inputs (`In A` to `In D`) and 8 outputs (`Out 1` to
+  `Out 8`) in one row. Clicking a strip's label selects that channel. Each strip
+  has a nickname field, gain (dB), delay (ms), polarity (Ø), mute (M) and a link
+  button.
+- **Selected-channel bar.** The selected channel's nickname and label, its link
+  group with the members and the sections it ties, and the plot options.
+- **Plot**, full width.
+- **Filter cards** for the selected channel, wrapping in one row.
+
+### Immediate controls and drafts
+
+Gain, polarity and mute are written to the unit as soon as you change them.
+They always send the value you asked for, even if the unit's value was changed
+elsewhere since the last readback, so mute is never refused over a conflict.
+They are still bounds-checked, refused on a locked unit and verified by readback;
+if that fails the control shows the device's value and an error. They never
+count as unapplied.
+
+Everything else (delay, crossovers, EQ bands) is a draft. Edited fields are
+outlined and counted in the top bar. **Revert** discards the drafts. **Apply**
+keeps the guarantees of the classic UI: values are bounds-checked, the lock state
+is checked, the unit is read back and a conflicting outside change is reported
+rather than overwritten, only changed blocks are written, and the readback is
+verified. With **Live** on, drafts are written as you make them instead, and
+Live needs a connected unit.
+
+### Links
+
+The link button on a strip joins its channel to a group (A, B, ...), each with a
+colour. Inputs link only with inputs and outputs only with outputs. A group
+ties some of the sections crossover, EQ, gain, delay and limiter; a new group ties
+crossover and EQ, and the tick boxes in the selected-channel bar change that.
+While tied, an edit to one of those sections on one member is made on every
+member (a tied gain is written to every member at once).
+
+A channel that joins takes the group's current values for the tied sections as
+ordinary edits; it never overwrites the group. If a readback shows members' tied
+sections differ (for example after a change made elsewhere) the group is marked
+out of sync and offers "Copy from ..." a member. Nothing is rewritten silently.
+**Unlink** removes the channel from its group.
+
+### Plot
+
+The plot shows the magnitude of the selected channel, with the draft curve drawn
+over the last readback. The options in the selected-channel bar are **Phase**
+and **Group delay** (extra panels under the magnitude, off by default), **Each
+filter** and **On device**. The curves are computed on the server from the same
+filter models as the classic UI (see [FILTER_MODELS.md](FILTER_MODELS.md)); the
+page only draws them. The same limits apply: they model the unit's processing
+only, not speakers, room or amplifier.
+
+Each enabled crossover and each EQ band in use has a handle. Drag it sideways to
+change frequency; for bands with gain, drag up or down to change gain; scroll
+the wheel over a handle to change Q. The values appear in the filter card as
+a draft, to be applied like any other. Unused bands have no handle.
+
+### Filter cards
+
+High-pass and low-pass cards come first (outputs only; inputs have no crossover),
+then one card per EQ band in use, with a checkbox to enable it, fields for
+frequency, gain, Q, type and slope as the band allows, and an **×** that
+removes the band. A band is in use when it is enabled, has non-zero gain or is not
+a parametric band; a configured but disabled band keeps a dimmed card. Removing
+a band disables it and resets it to a 0 dB parametric band, keeping its
+frequency and Q. **Add band** enables the first band not in use and shows
+`n of N used`.
+
+At the right, a small list shows the on/off state of the limiter, compressor and
+FIR, among other blocks. They cannot be edited here yet.
+
+### Nicknames and links are stored on this computer
+
+Nicknames and links are not written to the device. They are kept in one JSON
+file, `~/.config/sinbosen-la548/studio.json`, under a key for the unit: its
+`usb:<serial>` or its network address.
+
+### Not in the new UI yet
+
+These need `--classic` for now:
+
+- the mixer (routing matrix);
+- programs and presets, including saving and loading programs and channel copy;
+- measured traces, the Measured overlay and alignment;
+- FIR coefficient backup and restore;
+- editing the limiter, compressor, FIR and the other advanced blocks
+  (dynamic EQ, expander, input source, frequency shifter).
+
+Start the classic UI with `uv run --extra ui sinbosen-la548-ui --classic`. It is a
+separate launch, not a screen in the same process, and the two UIs cannot be open
+on the same device at once: stop one before starting the other. Unapplied
+drafts do not carry over.
+
+## Classic UI (`--classic`)
+
+The rest of this guide describes the Gradio UI, started with
+`sinbosen-la548-ui --classic`.
+
+
+### Install and launch (classic UI)
 
 Requires Python 3.12 or later. From the checkout:
 
 ```sh
 uv sync --extra ui
-uv run --extra ui sinbosen-la548-ui --demo
+uv run --extra ui sinbosen-la548-ui --classic --demo
 ```
 
-Open <http://127.0.0.1:7860>. `--port` changes the port. The application binds
+Open <http://127.0.0.1:7860>. `--port` changes the port. The classic application binds
 to `127.0.0.1`, disables public sharing and Gradio analytics, and starts offline.
 The optional UI extra adds Gradio, NumPy, SciPy, and Plotly; the core client has
 no runtime dependencies. `--demo` documents the default behavior.
 
-## Connect, preview, Apply, Live
+### Connect, preview, Apply, Live
 
 Enter the DSP IP address, or `usb` for a unit on USB (LA448; needs
 `uv sync --extra usb`), and **Connect**. Connection reads the lock state and
@@ -62,7 +196,7 @@ hardware fixture. Apply, Live, programs, and copy are simulated locally. Snapsho
 download returns the original demo fixture; it is not an encoder for simulated
 settings. Separate coefficient data is unavailable in demo mode.
 
-## Crossovers and allpass
+### Crossovers and allpass
 
 Output HP/LP cards are adjacent. Select enable, corner frequency, family, and
 slope. All three families allow 6–48 dB/oct. The odd-order Linkwitz–Riley modes
@@ -83,7 +217,7 @@ The firmware's nonfunctional global bypass command is not used.
 Sidebar controls manage gain, mute, polarity, and delay. The **Mixer** tab is
 binary input-to-output routing; it has no continuous crosspoint gain.
 
-## Response plots and export
+### Response plots and export
 
 Magnitude, phase, and group delay share a logarithmic frequency axis. Hover
 shows numerical values; zoom/pan and legend visibility use Plotly controls.
@@ -122,7 +256,7 @@ or unmodeled source selection mark totals incomplete and list omitted stages.
 An incomplete curve predicts only the stages explicitly modeled. Exact device
 coefficient agreement requires hardware comparison.
 
-## Open Sound Meter traces
+### Open Sound Meter traces
 
 Import a single native OSM stored-trace `.osm`, or a `.txt`, `.csv`, or `.frd`
 export. Native projects and live streaming are deferred. Text accepts ordered
@@ -145,7 +279,7 @@ Rename, show/hide, associate traces with an output, or set coherence masking.
 Imported samples and original file bytes remain immutable. Filters configured in
 the DSP are never applied again to imported measurements.
 
-## Alignment
+### Alignment
 
 Select a **common input** and two distinct outputs in **Alignment**. The electrical
 comparison shows both paths, their complex sum, and B-minus-A unwrapped phase.
@@ -161,7 +295,7 @@ not align traces automatically. Imported phase resolution limits interpolation
 accuracy; independent capture clocks and unknown reference offsets cannot be
 repaired by the importer.
 
-## Advanced controls, FIR, presets, and programs
+### Advanced controls, FIR, presets, and programs
 
 **Advanced** offers only blocks present on the channel: output compressor/limiter,
 input expander/dynamic EQ/source/shifter, and FIR parameters on both directions.
@@ -205,7 +339,7 @@ after a missing ACK where readback is still possible. If readback fails the serv
 disconnects and requires reconnect. Program/copy actions do not read or decode
 separate FIR coefficient buffers automatically.
 
-## Verification and remaining acceptance
+### Verification and remaining acceptance
 
 The unit suite covers packed snapshot boundaries, codecs, response mathematics,
 OSM semantics, service writes/conflicts/partial failure, Live, presets, operation
@@ -213,7 +347,7 @@ destinations, and offline Gradio callbacks. Chromium exercises the real assemble
 application through an injected fake client (see "Browser E2E and review videos"
 below).
 
-## Dragging EQ frequencies and seeing unapplied edits
+### Dragging EQ frequencies and seeing unapplied edits
 
 The magnitude plot has circular handles for enabled EQ/shelf bands and diamond
 handles for allpass. The selected disabled band has a hollow handle; moving it
@@ -240,7 +374,7 @@ removes it from the count. Failed or partially completed Apply keeps remaining
 edits visible, including after disconnect. Unfinished numeric input has its
 own warning; offline demo changes are explicitly marked as local.
 
-## Browser E2E and review videos
+### Browser E2E and review videos
 
 The browser suite starts a separate localhost Gradio server for every scenario.
 It accepts only the fake hostname `e2e.fake.invalid`, records its fake-device

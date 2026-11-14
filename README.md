@@ -41,6 +41,9 @@ firmware - see docs/PROTOCOL.md, "Known device behaviour and open
 questions" for the full list of what's confirmed vs. still genuinely open
 (e.g. EQ types 3/5's true identity).
 
+The web UI is separate from that. The new Tune screen (below) has so far only
+been exercised in offline demo and against fakes in tests, not on a real unit.
+
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/).
@@ -164,22 +167,47 @@ is what FIR type 5 applies, and backups keep it byte-exact. See [settings readba
 
 ```sh
 uv sync --extra ui
-uv run --extra ui sinbosen-la548-ui --demo
+uv run --extra ui sinbosen-la548-ui
 ```
 
-Open <http://127.0.0.1:7860>. The app starts with an offline fixture, sharing
-disabled. Enter the DSP address and Connect to read its actual settings.
-Crossovers, EQ/allpass, gain/delay/polarity, and the mixer have local previews;
-**Apply changes** writes only pending controls and verifies readback. Optional
-Live tuning starts off. Native OSM stored traces and text exports can overlay
-the filter plots and support phase-aware alignment. Advanced controls, local
-presets, downloads, program operations, and channel copy are included.
-Selected-channel FIR coefficient backups can be downloaded and restored with
-exact readback verification.
+Open the printed URL, <http://127.0.0.1:7860> by default. `--port` changes the
+port. The app starts in offline demo with the bundled fixture; use the
+connection chip in the top bar to connect to a unit (an IP address, `usb` or
+`usb:<serial>`). `--demo` is still accepted and changes nothing. Stop it with
+Ctrl-C, which closes the device connection.
 
-See the [UI guide](docs/UI_GUIDE.md) for tuning, trace formats, state behavior,
-and model limitations. Automated offline checks pass; UI hardware acceptance
-and OSM display comparison remain opt-in verification work.
+The server binds to `127.0.0.1` and only accepts requests from its own page
+(other Host and Origin headers are refused). `--host` binds elsewhere, but the
+UI has no authentication and can change the device's output levels, so the
+launcher prints a warning when you do.
+
+The Tune screen is one dense page: a top bar (connection, Live, count of
+unapplied changes, Revert, Apply), a strip per channel (all 4 inputs and 8
+outputs) with nickname, gain, delay, polarity, mute and link, a full-width
+response plot, and filter cards for the selected channel. Gain, polarity and
+mute are written at once; everything else is a draft until **Apply**, unless
+**Live** is on. Channels can be linked so edits to crossover, EQ, gain, delay or
+limiter settings apply to every member, and EQ bands and crossovers can be
+dragged on the plot. Nicknames and links are kept in
+`~/.config/sinbosen-la548/studio.json` on this computer, not on the device.
+
+Not yet in the new UI, and available only with `--classic`: the mixer,
+programs and presets, measured traces and alignment, FIR coefficient
+backup/restore, and editing the limiter, compressor, FIR and the other
+advanced blocks.
+
+```sh
+uv run --extra ui sinbosen-la548-ui --classic
+```
+
+`--classic` starts the older Gradio UI as it was, with its own address box.
+The two UIs cannot be open on the same device at once, and switching drops
+unapplied drafts.
+
+See the [UI guide](docs/UI_GUIDE.md) for both. The new screen has only been
+exercised in offline demo and with fakes in tests, not on a real unit. For the
+classic UI, automated offline checks pass; its hardware acceptance and OSM
+display comparison remain opt-in verification work.
 
 ## Development
 
@@ -219,7 +247,7 @@ docs/
   PROTOCOL.md           # protocol reference
   SETTINGS_READBACK.md  # typed settings snapshot layout
   FILTER_MODELS.md      # measured filter models behind the response previews
-  UI_GUIDE.md           # DSP Studio web UI guide
+  UI_GUIDE.md           # DSP Studio web UI guide (Tune screen and classic UI)
 hardware_test/
   Hardware-in-the-loop test suite (audio loopback through a real unit) - see its own README
 ```

@@ -1489,6 +1489,8 @@ ui = [
     { name = "numpy" },
     { name = "plotly" },
     { name = "scipy" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 usb = [
     { name = "hidapi" },
@@ -1496,6 +1498,7 @@ usb = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -1514,11 +1517,14 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'ui'", specifier = ">=2.0,<3" },
     { name = "plotly", marker = "extra == 'ui'", specifier = ">=6.0,<7" },
     { name = "scipy", marker = "extra == 'ui'", specifier = ">=1.15,<2" },
+    { name = "starlette", marker = "extra == 'ui'", specifier = ">=1.6,<2" },
+    { name = "uvicorn", marker = "extra == 'ui'", specifier = ">=0.53,<1" },
 ]
 provides-extras = ["ui", "usb"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.7" },

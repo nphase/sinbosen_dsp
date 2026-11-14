@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import atexit
 import json
 import uuid
@@ -687,15 +686,6 @@ def create_app(service: DSPService | None = None) -> DSPApp:
     return app
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Local LA548 DSP Studio (requires the ui extra)")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--demo", action="store_true", help="start offline (also the default)")
-    args = parser.parse_args()
-    create_app().launch(server_name=args.host, server_port=args.port, share=False, inbrowser=False,
+def launch_classic(host: str, port: int) -> None:
+    create_app().launch(server_name=host, server_port=port, share=False, inbrowser=False,
                         footer_links=[], theme=gr.themes.Soft(), css=CSS)
-
-
-if __name__ == "__main__":
-    main()
