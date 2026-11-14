@@ -185,13 +185,14 @@ The Tune screen is one dense page: a top bar (connection, Live, count of
 unapplied changes, Revert, Apply), a strip per channel (all 4 inputs and 8
 outputs) with nickname, gain, delay, polarity, mute and link, a full-width
 response plot, and filter cards for the selected channel, which is Out 1 when
-the page opens. Gain, polarity and mute are written at once; everything else is
-a draft until **Apply**, unless **Live** is on. Channels can be linked so edits
-to crossover, EQ, gain, delay or limiter settings apply to every member. On the
-plot, EQ bands and crossovers can be dragged (up and down is gain for a band and
-slope for a crossover) and the wheel over a handle changes Q. The
-selected-channel bar shows an estimate of the path's latency, computed from the
-draft and the measured figures in [docs/PROTOCOL.md](docs/PROTOCOL.md). A strip's
+the page opens. Gain, polarity and mute are written at once (a typed gain when
+you press Enter); everything else is a draft until **Apply**, unless **Live** is
+on. Channels can be linked so edits to crossover, EQ, delay or limiter settings
+apply to every member; links never tie gain, mute or polarity. On the plot, EQ
+bands and crossovers can be dragged (up and down is gain for a band and slope
+for a crossover) and the wheel over a handle changes Q. The top bar shows an
+estimate of the selected channel's latency, computed from the draft and the
+measured figures in [docs/PROTOCOL.md](docs/PROTOCOL.md). A strip's
 nickname is edited by double-clicking it. Nicknames and links are kept in
 `~/.config/sinbosen-la548/studio.json` on this computer, not on the device.
 

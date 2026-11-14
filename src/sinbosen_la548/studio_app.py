@@ -24,7 +24,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import links
-from .service import IMMEDIATE_BLOCKS, ApplyResult, ControlKey, DSPService, demo_settings
+from .service import ApplyResult, ControlKey, DSPService, demo_settings
 from .settings import CrossoverSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import band_in_use, build_state
@@ -115,17 +115,6 @@ class _Studio:
     def _save(self, notes: DeviceNotes) -> None:
         self.store.save(self.device_key, notes)
 
-    def _stage_and_write(self, edits: dict[ControlKey, object]) -> ApplyResult | None:
-        """Stage the edits that wait for Apply and write gain, polarity and mute straight away.
-
-        Returns the result of the immediate write, or None when there was none.
-        """
-        staged = {key: value for key, value in edits.items() if key.block not in IMMEDIATE_BLOCKS}
-        immediate = {key: value for key, value in edits.items() if key.block in IMMEDIATE_BLOCKS}
-        if staged:
-            self.service.stage_many(self.token, staged)
-        return self.service.write_now(self.token, immediate) if immediate else None
-
     def _group(self, letter: str) -> LinkGroup:
         group = next((g for g in self._notes().links if g.letter == letter), None)
         if group is None:
@@ -191,9 +180,8 @@ class _Studio:
     def now(self, body: dict[str, Any]) -> ApplyResult | None:
         output, channel = self._channel(body)
         key = ControlKey(output, channel, _text(body, "block"))
-        draft = self.service.view(self.token).draft
-        return self.service.write_now(self.token, links.expand(self._notes().links, draft,
-                                                               {key: body.get("value")}))
+        # Links never tie gain, mute or polarity: only this channel is written.
+        return self.service.write_now(self.token, {key: body.get("value")})
 
     def edit(self, body: dict[str, Any]) -> None:
         """One field (`field`, `value`) or several fields of the same block at once (`values`: {field: value})."""
@@ -270,22 +258,22 @@ class _Studio:
         notes = self._notes()
         self._save(replace(notes, nicknames={**notes.nicknames, (output, channel): _text(body, "name")}))
 
-    def link(self, body: dict[str, Any]) -> ApplyResult | None:
+    def link(self, body: dict[str, Any]) -> None:
+        """Join or create a group. A joining channel takes the group's tied sections as ordinary pending edits; no
+        tie-able section is written immediately, so joining never writes to the unit."""
         output, channel = self._channel(body)
         letter = body.get("letter")
         if letter is not None and not isinstance(letter, str):
             raise ValueError("letter must be a group letter or null")
         notes = self._notes()
         groups = links.with_member(notes.links, output, channel, letter)
-        result = None
         if letter is not None:
             # The group as it was before joining: the joiner must not be taken as its source.
             before = next(g for g in notes.links if g.letter == letter)
             if channel not in before.members:
                 draft = self.service.view(self.token).draft
-                result = self._stage_and_write(links.join(before, channel, draft))
+                self.service.stage_many(self.token, links.join(before, channel, draft))
         self._save(replace(notes, links=groups))
-        return result
 
     def unlink(self, body: dict[str, Any]) -> None:
         output, channel = self._channel(body)
@@ -300,7 +288,7 @@ class _Studio:
         self._save(replace(notes, links=links.with_sections(notes.links, _text(body, "letter"),
                                                             frozenset(sections))))
 
-    def link_sync(self, body: dict[str, Any]) -> ApplyResult | None:
+    def link_sync(self, body: dict[str, Any]) -> None:
         group = self._group(_text(body, "letter"))
         output, source = self._channel({"id": body.get("from")})
         if output != group.output or source not in group.members:
@@ -310,7 +298,7 @@ class _Studio:
         edits: dict[ControlKey, object] = {}
         for member in ordered.members[1:]:
             edits.update(links.join(ordered, member, draft))
-        return self._stage_and_write(edits)
+        self.service.stage_many(self.token, edits)
 
 
 def _result_json(result: ApplyResult) -> dict[str, Any]:

@@ -284,12 +284,13 @@ def test_link_menu_creates_and_joins_groups(studio: Studio) -> None:
     bar = studio.page.locator("#selected-bar")
     assert bar.get_by_text("with Out 4", exact=False).is_visible()
     assert bar.get_by_label("Crossover", exact=True).is_checked()
-    assert not bar.get_by_label("Gain", exact=True).is_checked()
+    assert bar.get_by_label("Gain", exact=True).count() == 0  # gain is never tied
+    assert not bar.get_by_label("Delay", exact=True).is_checked()
     with studio.page.expect_response("**/api/link/sections"):
-        bar.get_by_label("Gain", exact=True).check()
+        bar.get_by_label("Delay", exact=True).check()
     state = studio.page.evaluate("fetch('/api/state').then(response => response.json())")
-    assert state["selected"]["link"]["sections"]["gain"] is True
-    assert bar.get_by_label("Gain", exact=True).is_checked()
+    assert state["selected"]["link"]["sections"]["delay"] is True
+    assert bar.get_by_label("Delay", exact=True).is_checked()
     studio.field("Out 4 link").click()
     studio.page.get_by_role("menuitem", name="Unlink").click()
     studio.until("Out 4 link", "textContent", "Link")
@@ -840,18 +841,73 @@ def test_dragging_a_crossover_handle_down_steepens_its_slope(studio: Studio) -> 
     assert studio.server_state()["selected"]["filters"][0]["fields"][2]["value"] == 48
 
 
-def test_the_selected_bar_shows_the_paths_latency(studio: Studio) -> None:
-    latency = studio.page.locator("#selected-bar .latency")
-    assert latency.inner_text() == "Latency 1.73 ms"  # Out 1, fed by In A
+def test_the_top_bar_shows_the_selected_paths_latency(studio: Studio) -> None:
+    latency = studio.page.locator("#topbar .latency")
+    assert latency.text_content() == "Out 1 latency 1.73 ms"  # Out 1, fed by In A
+    assert studio.page.locator("#selected-bar .latency").count() == 0
     studio.select("Out 3")
-    latency.get_by_text("Latency 1.73 ms, no input routed").wait_for()
+    latency.get_by_text("latency 1.73 ms, no input routed").wait_for()
     delay = studio.field("Out 3 delay in ms")
     delay.fill("2.5")
     with studio.page.expect_response("**/api/edit"):
         delay.press("Enter")
-    latency.get_by_text("Latency 4.23 ms, no input routed").wait_for()
+    latency.get_by_text("latency 4.23 ms, no input routed").wait_for()
+    assert latency.locator(".latency-name").inner_text() == "Out 3"
     detail = latency.get_attribute("title") or ""
     assert "Out 3 delay: 2.500 ms" in detail and "Group delay" in detail and "0.667 ms" in detail
     assert latency.get_attribute("aria-description") == detail
     studio.select("In A")
-    latency.get_by_text("This input adds 0.00 ms").wait_for()
+    latency.get_by_text("adds 0.00 ms").wait_for()
+
+
+def test_a_long_name_in_the_latency_readout_ellipsises_before_the_bar_wraps(studio: Studio) -> None:
+    studio.select("Out 3")
+    studio.name("Out 3", "Midrange Left Upper Horn")
+    name = studio.page.locator("#topbar .latency-name")
+    name.get_by_text("Midrange Left Upper Horn").wait_for()
+
+    def one_row() -> bool:
+        centres = studio.page.locator("#topbar > *").evaluate_all(
+            "els => els.map(e => e.getBoundingClientRect()).map(r => r.top + r.height / 2)")
+        return bool(max(centres) - min(centres) <= 4)
+
+    assert one_row()  # at 1440 px
+    # A bar too narrow for the whole name: the name gives way, the bar stays on one line.
+    studio.page.evaluate("document.querySelector('#topbar').style.width = '820px'")
+    studio.page.wait_for_timeout(100)
+    assert one_row()
+    assert name.evaluate("el => el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === 'ellipsis'")
+
+
+def test_gain_is_sent_only_on_enter(studio: Studio) -> None:
+    page = studio.page
+    sent: list[str] = []
+    page.on("request", lambda request: sent.append(request.post_data or "") if "/api/now" in request.url else None)
+    gain = studio.field("Out 3 gain in dB")
+    gain.fill("-1")  # half-way to -12
+    assert "unsent" in (gain.get_attribute("class") or "")
+    assert gain.get_attribute("title") == "Press Enter to send"
+    page.locator("#plot").click(position={"x": 5, "y": 5})  # leaving the field discards it
+    studio.until("Out 3 gain in dB", "value", "0.0")
+    gain.fill("-1")
+    gain.press("Tab")
+    studio.until("Out 3 gain in dB", "value", "0.0")
+    gain.fill("-12")
+    gain.press("Escape")
+    studio.until("Out 3 gain in dB", "value", "0.0")
+    page.wait_for_timeout(300)
+    assert sent == []
+    gain.fill("-12")
+    with page.expect_response("**/api/now"):
+        gain.press("Enter")
+    studio.until("Out 3 gain in dB", "value", "-12.0")
+    assert [json.loads(body) for body in sent] == [{"id": "out:2", "block": "gain", "value": -12}]
+    assert "unsent" not in (gain.get_attribute("class") or "")
+
+
+def test_delay_still_commits_when_leaving_the_field(studio: Studio) -> None:
+    delay = studio.field("Out 5 delay in ms")
+    delay.fill("1.5")
+    with studio.page.expect_response("**/api/edit"):
+        delay.press("Tab")
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()

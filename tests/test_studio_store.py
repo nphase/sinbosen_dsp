@@ -26,7 +26,7 @@ def test_default_path_is_under_config_dir() -> None:
 def test_round_trip_per_device_key(tmp_path: Path) -> None:
     store = StudioStore(tmp_path / "studio.json")
     notes = DeviceNotes({(False, 0): "Kick", (True, 3): "Tweeter"},
-                        (group("A", False, (0, 1)), group("B", True, (2, 3), frozenset({"gain", "eq"}))))
+                        (group("A", False, (0, 1)), group("B", True, (2, 3), frozenset({"delay", "eq"}))))
     store.save("usb:123", notes)
     loaded = StudioStore(tmp_path / "studio.json").load("usb:123")
     assert loaded == notes
@@ -95,7 +95,7 @@ def test_invalid_groups_are_dropped_individually(tmp_path: Path) -> None:
         raw_group("A", False, [0, 1]),                    # valid
         raw_group("B", False, [2]),                       # a one-member group is kept
         raw_group("H", False, []),                        # an empty group is dropped
-        raw_group("C", False, [3, 4], ["eq", "bogus"]),   # unknown section
+        raw_group("C", False, [3, 4], ["eq", "bogus"]),   # an unknown section is stripped, the group kept
         raw_group("D", False, [1, 5]),                    # channel 1 already in A (same side)
         raw_group("E", True, [1, 5]),                     # outputs are a separate side: valid
         raw_group("ab", False, [6, 7]),                   # bad letter
@@ -105,7 +105,8 @@ def test_invalid_groups_are_dropped_individually(tmp_path: Path) -> None:
     ]}}})
     store = StudioStore(path)
     notes = store.load("usb:1")
-    assert [g.letter for g in notes.links] == ["A", "B", "E", "F"]
+    assert [g.letter for g in notes.links] == ["A", "B", "C", "E", "F"]
+    assert notes.links[2].sections == frozenset({"eq"})
     assert store.warning is None
     assert not (tmp_path / "studio.json.bad").exists()
 
@@ -164,3 +165,16 @@ def test_each_set_aside_gives_a_new_warning(tmp_path: Path, monkeypatch: pytest.
     store.load("usb:1")
     assert first is not None and store.warning is not None and first != store.warning
     assert store.warning.startswith("10:00:05")
+
+
+def test_a_stored_gain_section_is_stripped_and_the_group_kept(tmp_path: Path) -> None:
+    path = tmp_path / "studio.json"
+    write(path, {"version": 1, "devices": {"usb:1": {"nicknames": {}, "links": [
+        raw_group("A", True, [2, 3], ["crossover", "gain", "delay"]), raw_group("B", False, [0, 1], ["gain"])]}}})
+    notes = StudioStore(path).load("usb:1")
+    assert notes.links == (group("A", True, (2, 3), frozenset({"crossover", "delay"})),
+                           group("B", False, (0, 1), frozenset()))
+
+
+def test_sections_are_crossover_eq_delay_and_limiter() -> None:
+    assert SECTIONS == ("crossover", "eq", "delay", "limiter")

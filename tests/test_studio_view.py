@@ -212,14 +212,14 @@ def test_nicknames_and_links_pass_through(service: DSPService, token: str) -> No
         "letter": "A",
         "members": [{"id": "out:2", "label": "Out 3", "nickname": "Mid L"},
                     {"id": "out:3", "label": "Out 4", "nickname": "Mid R"}],
-        "sections": {"crossover": True, "eq": True, "gain": False, "delay": False, "limiter": False},
+        "sections": {"crossover": True, "eq": True, "delay": False, "limiter": False},
     }
 
 
 def test_link_sections_only_list_those_the_channel_kind_has(service: DSPService, token: str) -> None:
-    group = LinkGroup("B", False, (0, 1), frozenset({"eq", "gain"}))
+    group = LinkGroup("B", False, (0, 1), frozenset({"eq", "delay"}))
     result = state(service, token, DeviceNotes({}, (group,)), selected=IN_A)
-    assert result["selected"]["link"]["sections"] == {"eq": True, "gain": True, "delay": False}
+    assert result["selected"]["link"]["sections"] == {"eq": True, "delay": True}
     assert set(result["selected"]["link"]["sections"]) <= set(SECTIONS)
 
 
@@ -388,7 +388,7 @@ def test_selected_bar_latency_follows_the_draft(service: DSPService, token: str)
     service.stage(token, ControlKey(True, 0, "delay"), 2.5)
     service.stage(token, ControlKey(False, 0, "delay"), 1.0)
     latency = state(service, token, selected=(True, 0))["selected"]["latency"]
-    assert latency["text"] == "Latency 5.23 ms"
+    assert (latency["channel"], latency["text"]) == ("Out 1", "latency 5.23 ms")
     lines = latency["detail"].splitlines()
     assert "Base: 1.732 ms" in lines[0]
     assert any("Out 1 delay: 2.500 ms" in line for line in lines)
@@ -401,9 +401,9 @@ def test_selected_bar_latency_follows_the_draft(service: DSPService, token: str)
 def test_selected_bar_latency_ranges_and_unrouted_outputs(service: DSPService, token: str) -> None:
     service.stage(token, ControlKey(False, 2, "delay"), 0.5)  # In C feeds Out 5 and Out 6 in the demo
     service.stage(token, ControlKey(False, 0, "route", 4), True)  # In A now feeds Out 5 too
-    assert state(service, token, selected=(True, 4))["selected"]["latency"]["text"] == "Latency 1.73-2.23 ms"
+    assert state(service, token, selected=(True, 4))["selected"]["latency"]["text"] == "latency 1.73-2.23 ms"
     unrouted = state(service, token, selected=OUT3)["selected"]["latency"]
-    assert unrouted["text"] == "Latency 1.73 ms, no input routed"
+    assert unrouted["text"] == "latency 1.73 ms, no input routed"
     assert "No input is routed" in unrouted["detail"]
 
 
@@ -412,6 +412,12 @@ def test_selected_bar_latency_of_an_input_and_an_enabled_fir(service: DSPService
     fir = FIRParameters.read(controls(service.view(token).draft)[key])  # order index 1: 512 taps
     service.stage(token, key, replace(fir, enabled=True).snapshot(output=False))
     latency = state(service, token, selected=IN_A)["selected"]["latency"]
-    assert latency["text"] == "This input adds 4.00 ms"
+    assert (latency["channel"], latency["text"]) == ("In A", "adds 4.00 ms")
     assert "In A FIR, 512 taps: 3.995 ms" in latency["detail"]
     assert "1.732" not in latency["detail"].splitlines()[0]
+
+
+def test_latency_is_labelled_with_the_nickname_when_there_is_one(service: DSPService, token: str) -> None:
+    notes = DeviceNotes({(True, 2): "Mid L"}, ())
+    assert state(service, token, notes)["selected"]["latency"]["channel"] == "Mid L"
+    assert state(service, token, notes, selected=(True, 3))["selected"]["latency"]["channel"] == "Out 4"

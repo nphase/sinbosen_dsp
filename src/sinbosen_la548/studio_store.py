@@ -10,7 +10,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-SECTIONS: tuple[str, ...] = ("crossover", "eq", "gain", "delay", "limiter")
+# Gain, mute and polarity are never tied: each channel's level stays its own.
+SECTIONS: tuple[str, ...] = ("crossover", "eq", "delay", "limiter")
 NICKNAME_MAX = 24
 _VERSION = 1
 _LETTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -59,17 +60,19 @@ def _clean_nicknames(raw: dict[tuple[bool, int], str]) -> dict[tuple[bool, int],
 
 
 def _clean_links(groups: list[LinkGroup]) -> tuple[LinkGroup, ...]:
-    """Normalise each group and drop the invalid ones; a channel belongs to the first group that claims it."""
+    """Normalise each group and drop the invalid ones; a channel belongs to the first group that claims it.
+
+    Sections not in SECTIONS (such as a `gain` stored before gain stopped being tie-able) are stripped, keeping the
+    group."""
     kept: list[LinkGroup] = []
     taken: set[tuple[bool, int]] = set()
     for group in groups:
         members = tuple(sorted(set(group.members)))
         claimed = {(group.output, channel) for channel in members}
-        if (group.letter not in _LETTERS or not members or any(channel < 0 for channel in members)
-                or not group.sections <= set(SECTIONS) or claimed & taken):
+        if group.letter not in _LETTERS or not members or any(channel < 0 for channel in members) or claimed & taken:
             continue
         taken |= claimed
-        kept.append(LinkGroup(group.letter, group.output, members, group.sections))
+        kept.append(LinkGroup(group.letter, group.output, members, group.sections & frozenset(SECTIONS)))
     return tuple(kept)
 
 

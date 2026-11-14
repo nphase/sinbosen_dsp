@@ -277,16 +277,17 @@ def _stage(ch: ChannelSettings, label: str) -> tuple[Stage, list[str], bool]:
     return Stage(label, ch.base.delay_ms, fixed), lines, False
 
 
-def _latency(settings: DeviceSettings, selected: tuple[bool, int]) -> dict[str, str]:
-    """The selected channel's latency readout, from the draft: a short text and a line-by-line breakdown."""
+def _latency(settings: DeviceSettings, selected: tuple[bool, int], name: str) -> dict[str, str]:
+    """The selected channel's latency readout, from the draft: the channel's name (nickname or label), a short text
+    to follow it and a line-by-line breakdown."""
     output, index = selected
     own, lines, exact = _stage(_channel_of(settings, selected), _channel_label(output, index))
     if not output:
         low, high = path_latency(own, None)
         lines.append(f"The {BASE_LATENCY_MS:.3f} ms base latency and the output's delay and FIR come on top; "
                      "select an output for a whole path.")
-        text = f"This input adds {'at least ' if not exact else ''}{low:.2f} ms"
-        return {"text": text, "detail": "\n".join([*lines, *LATENCY_CAVEATS])}
+        text = f"adds {'at least ' if not exact else ''}{low:.2f} ms"
+        return {"channel": name, "text": text, "detail": "\n".join([*lines, *LATENCY_CAVEATS])}
     routed: list[Stage] = []
     for i, row in enumerate(settings.mix_matrix):
         if row[index]:
@@ -300,9 +301,9 @@ def _latency(settings: DeviceSettings, selected: tuple[bool, int]) -> dict[str, 
     if not routed:
         lines.append("No input is routed to this output; an input's delay and FIR would add to this.")
     figure = f"{low:.2f}" if f"{low:.2f}" == f"{high:.2f}" else f"{low:.2f}-{high:.2f}"
-    text = f"Latency {'at least ' if not exact else ''}{figure} ms{'' if routed else ', no input routed'}"
+    text = f"latency {'at least ' if not exact else ''}{figure} ms{'' if routed else ', no input routed'}"
     lines.insert(0, f"Base: {BASE_LATENCY_MS:.3f} ms (input to output with flat processing and no delay)")
-    return {"text": text, "detail": "\n".join([*lines, *LATENCY_CAVEATS])}
+    return {"channel": name, "text": text, "detail": "\n".join([*lines, *LATENCY_CAVEATS])}
 
 
 def _channel_entry(view: ServiceView, notes: DeviceNotes, output: bool, index: int, selected: tuple[bool, int],
@@ -332,7 +333,7 @@ def _selected_entry(view: ServiceView, notes: DeviceNotes, selected: tuple[bool,
             "nickname": notes.nicknames.get(selected, ""), "eq_slots": len(draft.eq_bands),
             "eq_used": sum(band_in_use(b) for b in draft.eq_bands), "link": link,
             "filters": _filter_cards(draft, baseline, pending_keys), "more": _more_rows(draft),
-            "latency": _latency(view.draft, selected)}
+            "latency": _latency(view.draft, selected, notes.nicknames.get(selected) or _channel_label(output, index))}
 
 
 def build_state(view: ServiceView, notes: DeviceNotes, *, selected: tuple[bool, int], device: str | None,

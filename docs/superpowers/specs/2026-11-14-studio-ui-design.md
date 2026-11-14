@@ -22,7 +22,8 @@ visible at once, colour-coded link groups).
 ## The Tune screen, top to bottom
 
 1. **Top bar** (one slim row): app name; connection chip (model, `USB` or
-   IP, state) that opens connect / disconnect / offline demo; tabs; Live
+   IP, state) that opens connect / disconnect / offline demo; tabs; the
+   selected channel's latency estimate ("Mid L latency 4.39 ms"); Live
    toggle; count of unapplied changes; Revert; Apply.
 2. **Channel strips**: all 4 inputs and 8 outputs in one row. Each strip has
    - its fixed label (`In A`..`In D`, `Out 1`..`Out 8`), which selects the
@@ -66,11 +67,13 @@ controls about 24 px tall, 4 px gaps, 12-13 px text, dark theme only.
   - A link group is app-side state: a letter (A, B, …), a colour, member
     channels and the set of tied sections. Inputs link only with inputs,
     outputs with outputs.
-  - Sections that can be tied: crossover, EQ, gain, delay, limiter. A new
-    group ties crossover and EQ.
+  - Sections that can be tied: crossover, EQ, delay, limiter. A new group
+    ties crossover and EQ. Gain, mute and polarity are never tied (owner's
+    decision after the first demo, for safety): each channel's level stays
+    its own. A stored group that still lists gain loads with it stripped.
   - When a channel joins a group, its tied sections are set to the group's
-    existing values as ordinary pending edits (immediate for gain if gain is
-    tied). The joining channel never overwrites the group.
+    existing values as ordinary pending edits; joining never writes to the
+    unit at once. The joining channel never overwrites the group.
   - If a readback shows members' tied sections differ (changed outside the
     app), the group is marked out of sync and offers "copy from <member>".
     Nothing is rewritten silently.
@@ -80,8 +83,9 @@ controls about 24 px tall, 4 px gaps, 12-13 px text, dark theme only.
   polarity follow the same rule so the three behave alike. There is no
   conflict check for them. They are still bounds-checked, refused on a
   locked unit, and verified by readback. On failure the control shows the
-  device's value and an error. Other pending edits are untouched. A tied
-  gain is written to every member. In offline demo they are simulated.
+  device's value and an error. Other pending edits are untouched. A typed
+  strip gain is sent only on Enter; leaving the field or Escape discards it.
+  In offline demo they are simulated.
 - **No channel copy on the Tune screen.** Links cover "make these channels
   the same". The device's own whole-channel copy (which also copies gain,
   mute and delay, writes at once and refuses to run with drafts pending)

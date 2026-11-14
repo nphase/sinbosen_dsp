@@ -10,7 +10,7 @@ const POLL_MS = 1000;
 const HINT = "Gain, polarity and mute take effect immediately.";
 const HINT_DRAFT = "Filters and delay wait for Apply.";
 const HINT_LIVE = "Filters and delay are sent as you edit.";
-const SECTION_LABELS = { crossover: "Crossover", eq: "EQ", gain: "Gain", delay: "Delay", limiter: "Limiter" };
+const SECTION_LABELS = { crossover: "Crossover", eq: "EQ", delay: "Delay", limiter: "Limiter" };
 // [option posted to /api/plot, label, the plot key present while the option is on]
 const PLOT_OPTIONS = [
   ["phase", "Phase", "phase_deg"],
@@ -280,19 +280,22 @@ function openMenu(kind, id = null) {
 // Controls
 
 // A strip field is about 47 px wide: "-10.0" fills it, so the unit is the placeholder and the tooltip, not a suffix.
+// An `enterOnly` field (gain, written to the unit at once) is sent only by Enter; until then it shows that it is unsent.
 function textInput(spec) {
   fields.set(spec.id, spec);
   const typing = ui.typing?.id === spec.id ? ui.typing : null;
+  const unsent = spec.enterOnly && typing && !typing.error;
   return h("input", {
     type: "text",
-    class: cls("field", spec.number && "number", spec.className, spec.pending && "pending", typing?.error && "invalid"),
+    class: cls("field", spec.number && "number", spec.className, spec.pending && "pending", typing?.error && "invalid",
+      unsent && "unsent"),
     "data-field": spec.id,
     "aria-label": spec.label,
     "aria-invalid": typing?.error ? "true" : false,
     "aria-describedby": typing?.error ? "field-error" : false,
     value: typing ? typing.text : spec.display,
     placeholder: spec.placeholder ?? spec.unit,
-    title: spec.title,
+    title: unsent ? "Press Enter to send" : spec.title,
     disabled: spec.disabled,
     autocomplete: "off",
     spellcheck: "false",
@@ -328,7 +331,7 @@ function topBar() {
     h("span", null, connectionText(status))),
     h("nav", { class: "tabs", "aria-label": "Screens" },
       h("button", { type: "button", class: "tab", "aria-current": "page" }, "Tune")),
-    h("div", { class: "spacer" }),
+    latencyReadout(state.selected.latency),
     h("label", { class: "check live", title: status.connected ? "" : "Live needs a connected unit" },
       h("input", { type: "checkbox", checked: status.live, disabled: !status.connected,
         "data-action": act((el) => send("/api/live", { enabled: el.checked })) }), "Live"),
@@ -338,6 +341,14 @@ function topBar() {
     h("button", { type: "button", class: "button primary", disabled: !pending,
       "data-action": act(() => send("/api/apply")) }, "Apply"),
   ];
+}
+
+// The selected channel's latency, in the space between the tab and Live; a long channel name is ellipsised first so
+// the bar stays on one line. A server started before the readout existed sends none: the space stays empty.
+function latencyReadout(latency) {
+  if (!latency) return h("div", { class: "spacer" });
+  return h("div", { class: "latency spacer", title: latency.detail, "aria-description": latency.detail },
+    h("span", { class: "latency-name" }, latency.channel), h("span", { class: "latency-text" }, ` ${latency.text}`));
 }
 
 function standingErrors() {
@@ -407,7 +418,7 @@ function strip(channel) {
   h("div", { class: "strip-pair" },
     textInput({
       id: `gain:${channel.id}`, label: `${label} gain in dB`, number: true, unit: "dB", title: "Gain (dB)",
-      display: fixed(channel.gain_db, 1), parse: numberParser("dB"), path: "/api/now",
+      enterOnly: true, display: fixed(channel.gain_db, 1), parse: numberParser("dB"), path: "/api/now",
       body: (value) => ({ id: channel.id, block: "gain", value }),
     }),
     textInput({
@@ -441,13 +452,9 @@ function hint() {
 function selectedBar() {
   const selected = state.selected;
   const channel = state.channels.find((c) => c.id === selected.id);
-  const latency = selected.latency;
   const items = [h("div", { class: "selected-name" },
     selected.nickname ? h("span", { class: "nick" }, selected.nickname) : null,
-    h("span", { class: "label" }, selected.label)),
-  // A server started before the readout existed sends no latency; the page still works against it.
-  latency ? h("div", { class: "latency", title: latency.detail, "aria-description": latency.detail }, latency.text)
-    : null];
+    h("span", { class: "label" }, selected.label))];
   const link = selected.link;
   if (link) {
     const others = link.members.filter((m) => m.id !== selected.id).map((m) => m.nickname || m.label);
@@ -688,8 +695,10 @@ document.addEventListener("input", (event) => {
     ui.address = el.value;
   } else if (isTextField(el)) {
     const hadError = ui.typing?.id === el.dataset.field && ui.typing.error;
+    const started = ui.typing?.id !== el.dataset.field;
     ui.typing = { id: el.dataset.field, text: el.value, error: null, busy: false };
-    if (hadError) render();
+    // Redraw when the "press Enter" cue appears, or when a refusal's message goes.
+    if (hadError || (started && fields.get(el.dataset.field)?.enterOnly)) render();
   }
 });
 
@@ -741,6 +750,14 @@ document.addEventListener("dblclick", (event) => {
 document.addEventListener("focusout", (event) => {
   const el = event.target;
   if (!isTextField(el)) return;
+  if (fields.get(el.dataset.field)?.enterOnly) {
+    // Leaving a gain field discards what was typed: a half-typed "-1" on the way to "-12" never reaches the unit.
+    if (ui.typing?.id === el.dataset.field && !ui.typing.busy) {
+      ui.typing = null;
+      render();
+    }
+    return;
+  }
   if (el.dataset.field === `nick:${ui.naming}`) {
     // Leaving the name field commits it; the field closes once nothing is left to send.
     ui.naming = null;

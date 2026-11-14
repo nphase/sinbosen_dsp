@@ -168,7 +168,7 @@ def test_a_stored_link_beyond_the_profile_does_not_break_the_state(store: Studio
         response = client.get("/api/state")
         assert response.status_code == 200, response.text
         post(client, "/api/select", id="in:0")
-        state = post(client, "/api/link/sections", letter="A", sections=["eq", "gain"])
+        state = post(client, "/api/link/sections", letter="A", sections=["eq", "delay"])
         assert [m["id"] for m in state["selected"]["link"]["members"]] == ["in:0"]
         assert client.post("/api/link/sections", json={"letter": "B", "sections": []}).status_code == 400
 
@@ -185,14 +185,25 @@ def test_now_refuses_blocks_that_need_apply(client: TestClient) -> None:
     assert "immediate" in response.json()["error"]
 
 
-def test_now_gain_follows_a_group_that_ties_gain(client: TestClient) -> None:
-    post(client, "/api/link", id="out:0", letter=None)
-    post(client, "/api/link", id="out:1", letter="A")
-    post(client, "/api/link/sections", letter="A", sections=["gain"])
-    state = post(client, "/api/now", id="out:0", block="gain", value=-6.0)
-    assert channel(state, "out:0")["gain_db"] == -6.0
-    assert channel(state, "out:1")["gain_db"] == -6.0
+def test_gain_mute_and_polarity_never_reach_link_members(client: TestClient) -> None:
+    post(client, "/api/link", id="out:3", letter=None)
+    before = channel(post(client, "/api/link", id="out:4", letter="A"), "out:4")
+    post(client, "/api/link/sections", letter="A", sections=["crossover", "eq", "delay", "limiter"])
+    post(client, "/api/now", id="out:3", block="polarity", value=not before["inverted"])
+    post(client, "/api/now", id="out:3", block="mute", value=True)
+    state = post(client, "/api/now", id="out:3", block="gain", value=-6.0)
+    assert (channel(state, "out:3")["gain_db"], channel(state, "out:3")["muted"]) == (-6.0, True)
+    after = channel(state, "out:4")
+    assert {k: after[k] for k in ("gain_db", "muted", "inverted")} == {k: before[k] for k in ("gain_db", "muted",
+                                                                                              "inverted")}
     assert state["status"]["pending_count"] == 0
+
+
+def test_gain_is_not_a_section_a_group_can_tie(client: TestClient) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    response = client.post("/api/link/sections", json={"letter": "A", "sections": ["gain"]})
+    assert response.status_code == 400
+    assert "gain" not in post(client, "/api/select", id="out:0")["selected"]["link"]["sections"]
 
 
 def test_linked_eq_edit_changes_both_members(client: TestClient) -> None:
@@ -241,13 +252,12 @@ def test_joining_takes_the_groups_values_from_the_pre_join_source(client: TestCl
     assert channel(state, "out:0")["link"]["in_sync"] is True
 
 
-def test_joining_a_group_that_ties_gain_writes_gain_now(client: TestClient) -> None:
+def test_joining_a_group_never_changes_the_joiners_gain(client: TestClient) -> None:
     post(client, "/api/link", id="out:3", letter=None)
-    post(client, "/api/link/sections", letter="A", sections=["gain"])
     post(client, "/api/now", id="out:3", block="gain", value=-4.0)
     state = post(client, "/api/link", id="out:5", letter="A")
-    assert channel(state, "out:5")["gain_db"] == -4.0
-    assert state["status"]["pending_count"] == 0
+    assert channel(state, "out:5")["gain_db"] == 0
+    assert state["result"] is None
 
 
 def test_link_sections_can_be_changed(client: TestClient) -> None:
@@ -495,18 +505,19 @@ def test_apply_with_an_external_conflict_reports_conflicts(store: StudioStore) -
     assert state["status"]["pending_count"] == 1
 
 
-def test_link_join_and_sync_report_their_immediate_writes(client: TestClient) -> None:
-    post(client, "/api/link", id="out:3", letter=None)
-    post(client, "/api/link/sections", letter="A", sections=["gain"])
-    post(client, "/api/now", id="out:3", block="gain", value=-4.0)
-    state = post(client, "/api/link", id="out:5", letter="A")
-    assert state["result"]["ok"] is True
-    post(client, "/api/link/sections", letter="A", sections=[])
-    post(client, "/api/now", id="out:5", block="gain", value=-1.0)
-    post(client, "/api/link/sections", letter="A", sections=["gain"])
-    state = post(client, "/api/link/sync", letter="A", **{"from": "out:3"})
-    assert state["result"]["ok"] is True
-    assert channel(state, "out:5")["gain_db"] == -4.0
+def test_link_join_and_sync_never_write_immediately(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        post(client, "/api/link", id="out:3", letter=None)
+        post(client, "/api/link/sections", letter="A", sections=["delay"])
+        post(client, "/api/edit", id="out:3", kind="delay", field="delay_ms", value=2.0)
+        state = post(client, "/api/link", id="out:5", letter="A")
+        assert state["result"] is None
+        state = post(client, "/api/link/sync", letter="A", **{"from": "out:3"})
+        assert state["result"] is None
+        assert channel(state, "out:5")["delay_ms"] == 2.0 and channel(state, "out:5")["delay_pending"] is True
+    assert device.writes == []
+    device.client.set_volume.assert_not_called()
 
 
 def wait_for(client: TestClient, done: Any) -> dict[str, Any]:

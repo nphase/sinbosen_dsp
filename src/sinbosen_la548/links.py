@@ -10,8 +10,8 @@ from .service import ControlKey, controls, same_value
 from .settings import DeviceSettings
 from .studio_store import SECTIONS, LinkGroup
 
-_SECTION_OF_BLOCK = {"hp": "crossover", "lp": "crossover", "eq": "eq", "gain": "gain", "delay": "delay",
-                     "limiter": "limiter"}
+# Gain, mute and polarity have no section: a link never ties them.
+_SECTION_OF_BLOCK = {"hp": "crossover", "lp": "crossover", "eq": "eq", "delay": "delay", "limiter": "limiter"}
 NEW_GROUP_SECTIONS = frozenset({"crossover", "eq"})
 
 

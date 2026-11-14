@@ -35,22 +35,27 @@ prints a warning.
 - **Top bar.** The connection chip shows `USB` or the unit's address and its
   state ("Offline demo", "Not connected"); clicking it opens the connect box
   (an IP address, `usb` or `usb:<serial>`) with **Connect**, **Refresh**,
-  **Disconnect** and **Offline demo**. Then the Tune tab, the **Live** toggle,
-  the count of unapplied changes, **Revert** and **Apply**.
+  **Disconnect** and **Offline demo**. Then the Tune tab, the selected
+  channel's latency (see "Latency" below), the **Live** toggle, the count of
+  unapplied changes, **Revert** and **Apply**.
 - **Channel strips.** All 4 inputs (`In A` to `In D`) and 8 outputs (`Out 1` to
   `Out 8`) in one row. Each strip has a header with its label and nickname, gain
   (dB), delay (ms), polarity (Ø), mute (M) and a link button. Clicking the
   header (its label or nickname) selects that channel.
-- **Selected-channel bar.** The selected channel's nickname and label, its
-  latency (see "Latency" below), its link group with the members and the
-  sections it ties, and the plot options.
+- **Selected-channel bar.** The selected channel's nickname and label, its link
+  group with the members and the sections it ties, and the plot options.
 - **Plot**, full width.
 - **Filter cards** for the selected channel, wrapping in one row.
 
 ### Immediate controls and drafts
 
-Gain, polarity and mute are written to the unit as soon as you change them.
-They always send the value you asked for, even if the unit's value was changed
+Gain, polarity and mute are written to the unit as soon as you change them. A
+strip's gain is sent when you press **Enter**: while a typed value has not been
+sent, the field is outlined in blue and its tooltip says "Press Enter to send".
+Leaving the field (clicking elsewhere or Tab) or pressing Escape discards the
+typed value and shows the unit's gain again, so a half-typed "-1" on the way to
+"-12" never reaches the unit. Delay and the filter-card fields are drafts and
+are kept when you leave the field. Gain, polarity and mute always send the value you asked for, even if the unit's value was changed
 elsewhere since the last readback, so mute is never refused over a conflict.
 They are still bounds-checked, refused on a locked unit and verified by readback;
 if that fails the control shows the device's value and an error. They never
@@ -73,10 +78,13 @@ discard the drafts; with unapplied edits the box asks before doing either.
 
 The link button on a strip joins its channel to a group (A, B, ...), each with a
 colour. Inputs link only with inputs and outputs only with outputs. A group
-ties some of the sections crossover, EQ, gain, delay and limiter; a new group ties
+ties some of the sections crossover, EQ, delay and limiter; a new group ties
 crossover and EQ, and the tick boxes in the selected-channel bar change that.
 While tied, an edit to one of those sections on one member is made on every
-member (a tied gain is written to every member at once).
+member, as a draft. Links never tie gain, mute or polarity: each channel's level
+is its own, and joining a group or copying from a member never writes anything
+to the unit at once. A group stored by an earlier version that tied gain keeps
+its other sections.
 
 A channel that joins takes the group's current values for the tied sections as
 ordinary edits; it never overwrites the group. If a readback shows members' tied
@@ -127,8 +135,10 @@ are on (an input has only the FIR). They cannot be edited here yet.
 
 ### Latency
 
-The selected-channel bar shows an estimate of the latency, such as "Latency
-4.39 ms", computed from the draft settings and the figures measured in
+The top bar shows an estimate of the selected channel's latency, labelled with
+its nickname or, without one, its label, such as "Mid L latency 4.39 ms"
+(a long name is cut short before the bar would need a second line). It is
+computed from the draft settings and the figures measured in
 [PROTOCOL.md](PROTOCOL.md) ("Latency"). For an output it adds up the base
 latency (1.732 ms, analog input to analog output with flat processing), the
 output's delay, its FIR if enabled, and the delay and enabled FIR of an input
