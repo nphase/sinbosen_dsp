@@ -13,8 +13,12 @@ happens. Limiters, dynamics, FIR and input-side processing are never written.
 
 from __future__ import annotations
 
+import argparse
+import sys
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from sinbosen_la548.client import Client
 from sinbosen_la548.service import ControlKey, changes, controls, normalize_control, replace_control
@@ -24,6 +28,9 @@ from . import restore
 
 OK = "ok"
 NOT_RUN = "not run"
+INPUTS = "ABCD"
+DEFAULT_BACKUP = "ignore/write-check-baseline.bin"
+USB_HINT = "USB support needs the usb extra: uv run --extra usb python -m hardware_test.write_check usb --amps-off"
 
 
 @dataclass(frozen=True)
@@ -88,7 +95,7 @@ def candidates(settings: DeviceSettings, *, output: int = 7, route_input: int = 
         Step(f"{out} gain", key("gain"), _nudged(settings, key("gain"), -1.0)),
         Step(f"{out} polarity", key("polarity"), not now[key("polarity")]),
         Step(f"{out} delay", key("delay"), _nudged(settings, key("delay"), 1.0)),
-        Step(f"In {'ABCD'[route_input]} to {out} route", route, not now[route]),
+        Step(f"In {INPUTS[route_input]} to {out} route", route, not now[route]),
         Step(f"{out} high-pass frequency", key("hp"), replace(hp, freq_hz=_other(hp.freq_hz, 120, 150))),
         Step(f"{out} high-pass type", key("hp"), replace(hp, filter_type=(hp.filter_type + 1) % 3)),
         Step(f"{out} high-pass slope", key("hp"),
@@ -172,3 +179,65 @@ def markdown(report: Report) -> str:
     if report.restore_error:
         summary += f" Restore error: {report.restore_error}"
     return "\n".join([*lines, "", summary])
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m hardware_test.write_check",
+        description="Write each setting the tuning loop uses with a changed value, read it back and undo it. "
+                    "Plays no audio. Turn the amplifiers off first: one output is briefly unmuted, re-routed "
+                    "and re-filtered.")
+    parser.add_argument("address", nargs="?", default="usb",
+                        help="`usb`, `usb:<serial>` or an IP address (default: usb)")
+    parser.add_argument("--amps-off", action="store_true",
+                        help="confirm the amplifiers are off or the unit's outputs are unplugged (required)")
+    parser.add_argument("--output", type=int, choices=range(1, 9), default=8, metavar="1-8",
+                        help="output to write to (default: 8)")
+    parser.add_argument("--input", choices=tuple(INPUTS), default="D",
+                        help="input whose route to that output is toggled (default: D)")
+    parser.add_argument("--eq-band", type=int, choices=range(1, 16), default=15, metavar="1-15",
+                        help="EQ band on that output to write to (default: 15)")
+    parser.add_argument("--backup", type=Path, default=Path(DEFAULT_BACKUP),
+                        help=f"where to save the unit's snapshot before the first write (default: {DEFAULT_BACKUP})")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None, *,
+         connect: Callable[[str], AbstractContextManager[Client]] = Client) -> int:
+    """Exit 0: every step ok and the unit restored byte-identical. 1: a step
+    failed but the unit was restored. 2: nothing was run, or the unit was
+    not restored."""
+    args = _parser().parse_args(argv)
+    if not args.amps_off:
+        print("Nothing was written. Turn the amplifiers off (or unplug the unit's outputs), then run again "
+              "with --amps-off: the check briefly unmutes, re-routes and re-filters one output.", file=sys.stderr)
+        return 2
+
+    def save(raw: bytes) -> None:
+        args.backup.parent.mkdir(parents=True, exist_ok=True)
+        args.backup.write_bytes(raw)
+
+    try:
+        with connect(args.address) as client:
+            report = run(client, output=args.output - 1, route_input=INPUTS.index(args.input),
+                         eq_band=args.eq_band - 1, on_baseline=save)
+    except Exception as exc:
+        print(f"The write check did not run: {exc}", file=sys.stderr)
+        if "hidapi" in str(exc):
+            print(USB_HINT, file=sys.stderr)
+        return 2
+
+    print(markdown(report))
+    for result in report.results:
+        if result.outcome not in (OK, NOT_RUN):
+            print(f"FAILED: {result.step.name}: {result.outcome}. {result.detail}".rstrip(), file=sys.stderr)
+    if not (report.restored and report.byte_identical):
+        print(f"The unit was NOT restored to how it was found. {report.restore_error}".rstrip(), file=sys.stderr)
+        print(f"Its snapshot from before the run is in {args.backup}. Do not write to the unit again until "
+              "this is understood.", file=sys.stderr)
+        return 2
+    return 0 if report.passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

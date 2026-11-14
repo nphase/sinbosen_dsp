@@ -229,3 +229,111 @@ def test_markdown_says_when_the_unit_was_not_restored():
 
     text = write_check.markdown(write_check.run(FakeUnit(hook=hook)))
     assert "Settings restored: no." in text and "link down" in text
+
+
+class _Connected:
+    """Stands in for `Client(address)` used as a context manager."""
+
+    def __init__(self, unit: FakeUnit, opened: list[str]) -> None:
+        self.unit, self.opened = unit, opened
+
+    def __call__(self, address: str) -> "_Connected":
+        self.opened.append(address)
+        return self
+
+    def __enter__(self) -> FakeUnit:
+        return self.unit
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def _main(unit: FakeUnit, tmp_path: Path, *extra: str) -> tuple[int, Path]:
+    backup = tmp_path / "deep" / "b.bin"
+    code = write_check.main(["usb", "--amps-off", "--backup", str(backup), *extra], connect=_Connected(unit, []))
+    return code, backup
+
+
+def test_main_refuses_without_amps_off(capsys):
+    opened: list[str] = []
+    code = write_check.main(["usb"], connect=_Connected(FakeUnit(), opened))
+    assert code == 2 and opened == []
+    assert "--amps-off" in capsys.readouterr().err
+
+
+def test_main_clean_run_prints_the_table_and_exits_0(tmp_path, capsys):
+    unit = FakeUnit()
+    before = unit.read_group()
+    code, backup = _main(unit, tmp_path)
+    assert code == 0
+    assert "| Out 8 delay |" in capsys.readouterr().out
+    assert backup.read_bytes() == before
+
+
+def test_main_defaults_to_the_usb_address(tmp_path):
+    opened: list[str] = []
+    write_check.main(["--amps-off", "--backup", str(tmp_path / "b.bin")], connect=_Connected(FakeUnit(), opened))
+    assert opened == ["usb"]
+
+
+def test_main_backup_is_written_before_the_first_write(tmp_path):
+    backup = tmp_path / "deep" / "b.bin"
+    seen: list[bool] = []
+
+    def hook(unit: FakeUnit, key: ControlKey, value: object) -> bool:
+        seen.append(backup.exists())
+        return False
+
+    _main(FakeUnit(hook=hook), tmp_path)
+    assert seen and all(seen)
+
+
+def test_main_step_failure_exits_1(tmp_path, capsys):
+    code, _ = _main(FakeUnit(hook=lambda u, key, value: key.block == "delay"), tmp_path)
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "| Out 8 delay |" in captured.out and "no change" in captured.out
+    assert "Out 8 delay" in captured.err
+
+
+def test_failed_restore_exits_2_and_names_the_backup(tmp_path, capsys):
+    def hook(unit: FakeUnit, key: ControlKey, value: object) -> bool:
+        if len(unit.writes) > 1:
+            raise OSError("link down")
+        return False
+
+    code, backup = _main(FakeUnit(hook=hook), tmp_path)
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "NOT restored" in err and str(backup) in err
+
+
+def test_main_locked_unit_exits_2(tmp_path, capsys):
+    unit = FakeUnit(locked=True)
+    code, _ = _main(unit, tmp_path)
+    assert code == 2 and unit.writes == []
+    assert "locked" in capsys.readouterr().err
+
+
+def test_main_uses_the_chosen_channel(tmp_path, capsys):
+    code, _ = _main(FakeUnit(), tmp_path, "--output", "7", "--input", "C", "--eq-band", "14")
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "| In C to Out 7 route |" in out and "| Out 7 EQ band 14 |" in out
+
+
+@pytest.mark.parametrize("bad", [("--output", "9"), ("--output", "0"), ("--input", "E"), ("--eq-band", "16")])
+def test_main_rejects_out_of_range_choices(tmp_path, bad):
+    with pytest.raises(SystemExit) as raised:
+        _main(FakeUnit(), tmp_path, *bad)
+    assert raised.value.code == 2
+
+
+def test_main_explains_a_missing_usb_extra(tmp_path, capsys):
+    def connect(address: str):
+        raise RuntimeError("USB support needs the 'hidapi' package")
+
+    code = write_check.main(["usb", "--amps-off", "--backup", str(tmp_path / "b.bin")], connect=connect)
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "uv run --extra usb python -m hardware_test.write_check usb --amps-off" in err
