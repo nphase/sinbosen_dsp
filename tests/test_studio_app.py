@@ -62,7 +62,8 @@ def test_state_after_start_is_the_demo(client: TestClient) -> None:
     assert state["status"]["connected"] is False
     assert state["status"]["device"] is None
     assert state["status"]["pending_count"] == 0
-    assert state["selected"]["id"] == "in:0"
+    assert state["selected"]["id"] == "out:0"
+    assert channel(state, "out:0")["selected"] is True
     assert len(state["channels"]) == 12
 
 
@@ -221,9 +222,9 @@ def test_creating_a_group_adds_a_one_member_group(client: TestClient) -> None:
     state = post(client, "/api/link", id="out:0", letter=None)
     link = channel(state, "out:0")["link"]
     assert (link["letter"], link["in_sync"]) == ("A", True)
-    assert state["selected"]["link"] is None  # in:0 is still selected
-    state = post(client, "/api/select", id="out:0")
-    assert state["selected"]["link"]["members"][0]["id"] == "out:0"
+    assert state["selected"]["link"]["members"][0]["id"] == "out:0"  # out:0 is selected from the start
+    state = post(client, "/api/select", id="out:1")
+    assert state["selected"]["link"] is None
 
 
 def test_joining_takes_the_groups_values_from_the_pre_join_source(client: TestClient) -> None:
@@ -560,7 +561,7 @@ def test_a_foreign_origin_is_refused(client: TestClient) -> None:
     for origin in ("http://evil.example", "http://127.0.0.1:9999", "null"):
         response = client.post("/api/select", json={"id": "out:1"}, headers={"origin": origin})
         assert response.status_code == 403
-    assert client.get("/api/state").json()["selected"]["id"] == "in:0"
+    assert client.get("/api/state").json()["selected"]["id"] == "out:0"
     assert client.get("/api/state", headers={"origin": "http://evil.example"}).status_code == 403
     assert client.post("/api/select", json={"id": "out:1"}, headers={"origin": "http://127.0.0.1"}).status_code == 200
 

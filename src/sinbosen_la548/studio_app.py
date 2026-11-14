@@ -84,7 +84,7 @@ class _Studio:
         self.tuning = TuningController(service)
         self.token = service.new_session()
         self.lock = threading.RLock()
-        self.selected = (False, 0)
+        self.selected = (True, 0)  # Out 1
         self.plot: dict[str, bool] = {"phase": False, "group_delay": False, "each_filter": True, "on_device": True}
         self.device_key = DEMO_DEVICE_KEY
         self.live_errors = ""
@@ -95,7 +95,7 @@ class _Studio:
         view = self.service.view(self.token)
         channels = view.draft.outputs if self.selected[0] else view.draft.inputs
         if self.selected[1] >= len(channels):
-            self.selected = (False, 0)
+            self.selected = (True, 0)
         return build_state(view, self._notes(), selected=self.selected,
                            device=None if view.demo else self.device_key, live_errors=self.live_errors,
                            warning=self.store.warning, **self.plot)

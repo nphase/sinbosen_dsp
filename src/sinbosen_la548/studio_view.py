@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from string import ascii_uppercase
 from typing import Any
 
@@ -10,6 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import codecs
+from .fir_adapter import FIRParameters
 from .links import in_sync
 from .response import Response, channel_response, frequency_grid
 from .service import Change, ControlKey, ServiceView
@@ -31,6 +33,20 @@ Q_BOUNDS = (round(codecs.eq_q_u16.decode((295).to_bytes(2, "little")), 3),
 SLOPES = tuple(range(6, 49, 6))
 # The sections a channel kind can tie that are not present on every channel.
 _OPTIONAL_SECTIONS = {"crossover": "hp", "limiter": "limiter"}
+# Measured latency (docs/PROTOCOL.md, "Latency"): input A to output 1 with flat processing and no delay; an enabled
+# FIR adds (N - 1) / 2 + 128 samples at 96 kHz, measured as 2.662 and 3.995 ms; a Kaiser-window FIR write at 21 dB
+# can make every path 64 samples slower.
+BASE_LATENCY_MS = 1.732
+FIR_FIXED_SAMPLES = 128
+LATENCY_SAMPLES_PER_MS = 96
+FIR_TAPS = {0: 256, 1: 512}  # by order index
+FIR_LATENCY_MS = {256: 2.662, 512: 3.995}
+LINEAR_PHASE_FIR_TYPES = frozenset({0, 1, 2})
+LATENCY_CAVEATS = (
+    "EQ and crossover delay varies with frequency and is not included (see Group delay).",
+    "The unit can be 0.667 ms slower, depending on its most recent Kaiser-window FIR write, which cannot be read back.",
+    "Figures were measured on an LA548 from input A to output 1.",
+)
 
 
 def band_in_use(band: EQBandSettings) -> bool:
@@ -64,7 +80,7 @@ def _number(key: str, label: str, value: float, bounds: tuple[float, float], *, 
 
 def _select(key: str, label: str, value: int, options: list[dict[str, Any]], *, pending: bool) -> dict[str, Any]:
     if all(o["value"] != value for o in options):
-        options = [*options, _option(value, f"Unresolved ({value})")]
+        options = [*options, {**_option(value, f"Unresolved ({value})"), "unresolved": True}]
     return {"key": key, "label": label, "kind": "select", "value": value, "options": options, "editable": True,
             "pending": pending}
 
@@ -142,12 +158,22 @@ def _link_section_names(ch: ChannelSettings) -> list[str]:
     return [s for s in SECTIONS if s not in _OPTIONAL_SECTIONS or getattr(ch, _OPTIONAL_SECTIONS[s]) is not None]
 
 
-def _plot_handles(draft: ChannelSettings) -> list[tuple[str, str, int, bool]]:
-    """(key, label, frequency, has_gain) for enabled crossovers and bands in use."""
-    handles = [(kind, "High-pass" if kind == "hp" else "Low-pass", getattr(draft, kind).freq_hz, False)
+@dataclass(frozen=True)
+class _Handle:
+    key: str
+    label: str
+    freq_hz: int
+    has_gain: bool
+    enabled: bool = True
+    gain_db: float = 0.0
+
+
+def _plot_handles(draft: ChannelSettings) -> list[_Handle]:
+    """Enabled crossovers and bands in use, enabled or not."""
+    handles = [_Handle(kind, "High-pass" if kind == "hp" else "Low-pass", getattr(draft, kind).freq_hz, False)
                for kind in ("hp", "lp") if getattr(draft, kind) is not None and getattr(draft, kind).enabled]
-    handles += [(f"eq:{i}", f"EQ {i + 1}", band.freq_hz, band.type not in ALLPASS_TYPES)
-                for i, band in enumerate(draft.eq_bands) if band_in_use(band)]
+    handles += [_Handle(f"eq:{i}", f"EQ {i + 1}", band.freq_hz, band.type not in ALLPASS_TYPES, band.enabled,
+                        band.gain_db) for i, band in enumerate(draft.eq_bands) if band_in_use(band)]
     return handles
 
 
@@ -174,7 +200,7 @@ def _plot(view: ServiceView, selected: tuple[bool, int], pending_keys: set[Contr
     rate = view.draft.profile.sample_rate_hz
     handles = _plot_handles(draft)
     # Each handle's own frequency is a grid point, so its dot lands exactly on the curve.
-    on_grid = [float(f) for _, _, f, _ in handles if PLOT_LOW_HZ <= f <= PLOT_HIGH_HZ]
+    on_grid = [float(h.freq_hz) for h in handles if PLOT_LOW_HZ <= h.freq_hz <= PLOT_HIGH_HZ]
     base_grid = frequency_grid(sample_rate_hz=rate, low=PLOT_LOW_HZ, high=PLOT_HIGH_HZ,
                                points=PLOT_POINTS - len(on_grid))
     freq = np.unique(np.concatenate([base_grid, on_grid]))
@@ -190,16 +216,93 @@ def _plot(view: ServiceView, selected: tuple[bool, int], pending_keys: set[Contr
         plot["phase_deg"] = _series(total.phase_deg)
     if group_delay:
         plot["group_delay_ms"] = _series(total.group_delay_ms)
+    # A disabled band adds nothing to the curve; its handle sits where the band would put it: the curve plus its gain.
     plot["handles"] = [
-        {"key": key, "label": label, "freq_hz": f, "db": _handle_db(freq, total, f), "has_gain": has_gain,
-         "pending": _control_key(output, index, key) in pending_keys}
-        for key, label, f, has_gain in handles]
+        {"key": h.key, "label": h.label, "freq_hz": h.freq_hz,
+         "db": _handle_db(freq, total, h.freq_hz, 0.0 if h.enabled or not h.has_gain else h.gain_db),
+         "has_gain": h.has_gain, "enabled": h.enabled, "pending": _control_key(output, index, h.key) in pending_keys}
+        for h in handles]
     return plot
 
 
-def _handle_db(freq: NDArray[np.float64], total: Response, hz: float) -> float | None:
-    value = float(np.interp(hz, freq, total.magnitude_db))
+def _handle_db(freq: NDArray[np.float64], total: Response, hz: float, offset_db: float) -> float | None:
+    value = float(np.interp(hz, freq, total.magnitude_db)) + offset_db
     return round(value, 3) if np.isfinite(value) else None
+
+
+# Latency
+
+@dataclass(frozen=True)
+class Stage:
+    """One channel's own part of a path's latency: its delay, plus its FIR's when the FIR is on."""
+    label: str
+    delay_ms: float
+    fir_ms: float = 0.0
+
+    @property
+    def ms(self) -> float:
+        return self.delay_ms + self.fir_ms
+
+
+def fir_latency_ms(taps: int) -> float:
+    """What an enabled linear-phase FIR of `taps` taps adds: the measured figure, else (N - 1) / 2 + 128 samples."""
+    return FIR_LATENCY_MS.get(taps, ((taps - 1) / 2 + FIR_FIXED_SAMPLES) / LATENCY_SAMPLES_PER_MS)
+
+
+def path_latency(channel: Stage, routed: Sequence[Stage] | None) -> tuple[float, float]:
+    """The lowest and highest latency through `channel`, in ms.
+
+    For an output, `routed` are the inputs the mix matrix sends to it: the base latency, the output's part and each
+    input's part; with none routed, the base and the output's part. For an input, `routed` is None and the result
+    is the input's own part only.
+    """
+    if routed is None:
+        return channel.ms, channel.ms
+    totals = [BASE_LATENCY_MS + channel.ms + stage.ms for stage in routed] or [BASE_LATENCY_MS + channel.ms]
+    return min(totals), max(totals)
+
+
+def _stage(ch: ChannelSettings, label: str) -> tuple[Stage, list[str], bool]:
+    """The channel's stage, its breakdown lines, and False when its FIR's delay can only be partly counted."""
+    lines = [f"{label} delay: {ch.base.delay_ms:.3f} ms"]
+    fir = None if ch.fir is None else FIRParameters.read(ch.fir)
+    if fir is None or not fir.enabled:
+        return Stage(label, ch.base.delay_ms), lines, True
+    taps = FIR_TAPS.get(fir.order_index)
+    if taps is not None and fir.fir_type in LINEAR_PHASE_FIR_TYPES:
+        lines.append(f"{label} FIR, {taps} taps: {fir_latency_ms(taps):.3f} ms")
+        return Stage(label, ch.base.delay_ms, fir_latency_ms(taps)), lines, True
+    fixed = FIR_FIXED_SAMPLES / LATENCY_SAMPLES_PER_MS
+    lines.append(f"{label} FIR: {fixed:.3f} ms counted; its coefficients' own delay is not known")
+    return Stage(label, ch.base.delay_ms, fixed), lines, False
+
+
+def _latency(settings: DeviceSettings, selected: tuple[bool, int]) -> dict[str, str]:
+    """The selected channel's latency readout, from the draft: a short text and a line-by-line breakdown."""
+    output, index = selected
+    own, lines, exact = _stage(_channel_of(settings, selected), _channel_label(output, index))
+    if not output:
+        low, high = path_latency(own, None)
+        lines.append(f"The {BASE_LATENCY_MS:.3f} ms base latency and the output's delay and FIR come on top; "
+                     "select an output for a whole path.")
+        text = f"This input adds {'at least ' if not exact else ''}{low:.2f} ms"
+        return {"text": text, "detail": "\n".join([*lines, *LATENCY_CAVEATS])}
+    routed: list[Stage] = []
+    for i, row in enumerate(settings.mix_matrix):
+        if row[index]:
+            stage, part, known = _stage(settings.inputs[i], _channel_label(False, i))
+            routed.append(stage)
+            lines += part
+            exact = exact and known
+    low, high = path_latency(own, routed)
+    if len(routed) > 1:
+        lines += [f"Through {stage.label}: {BASE_LATENCY_MS + own.ms + stage.ms:.3f} ms" for stage in routed]
+    if not routed:
+        lines.append("No input is routed to this output; an input's delay and FIR would add to this.")
+    figure = f"{low:.2f}" if f"{low:.2f}" == f"{high:.2f}" else f"{low:.2f}-{high:.2f}"
+    text = f"Latency {'at least ' if not exact else ''}{figure} ms{'' if routed else ', no input routed'}"
+    lines.insert(0, f"Base: {BASE_LATENCY_MS:.3f} ms (input to output with flat processing and no delay)")
+    return {"text": text, "detail": "\n".join([*lines, *LATENCY_CAVEATS])}
 
 
 def _channel_entry(view: ServiceView, notes: DeviceNotes, output: bool, index: int, selected: tuple[bool, int],
@@ -228,7 +331,8 @@ def _selected_entry(view: ServiceView, notes: DeviceNotes, selected: tuple[bool,
     return {"id": _channel_id(output, index), "label": _channel_label(output, index),
             "nickname": notes.nicknames.get(selected, ""), "eq_slots": len(draft.eq_bands),
             "eq_used": sum(band_in_use(b) for b in draft.eq_bands), "link": link,
-            "filters": _filter_cards(draft, baseline, pending_keys), "more": _more_rows(draft)}
+            "filters": _filter_cards(draft, baseline, pending_keys), "more": _more_rows(draft),
+            "latency": _latency(view.draft, selected)}
 
 
 def build_state(view: ServiceView, notes: DeviceNotes, *, selected: tuple[bool, int], device: str | None,

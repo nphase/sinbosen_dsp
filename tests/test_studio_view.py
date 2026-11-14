@@ -6,9 +6,10 @@ from typing import Any
 
 import pytest
 
+from sinbosen_la548.fir_adapter import FIRParameters
 from sinbosen_la548.service import ControlKey, DSPService, controls, demo_settings
 from sinbosen_la548.studio_store import SECTIONS, DeviceNotes, LinkGroup
-from sinbosen_la548.studio_view import LINK_COLOURS, band_in_use, build_state
+from sinbosen_la548.studio_view import LINK_COLOURS, Stage, band_in_use, build_state, fir_latency_ms, path_latency
 
 NO_NOTES = DeviceNotes({}, ())
 OUT3 = (True, 2)
@@ -319,3 +320,98 @@ def test_labels_tolerate_channels_beyond_the_alphabet(service: DSPService, token
     group = LinkGroup("A", False, (0, 99), frozenset({"eq"}))
     result = state(service, token, DeviceNotes({}, (group,)), selected=IN_A)
     assert [m["label"] for m in result["selected"]["link"]["members"]] == ["In A", "In 100"]
+
+
+# Disabled bands keep a handle
+
+def test_a_disabled_band_in_use_keeps_a_greyed_handle_at_its_own_gain(service: DSPService, token: str) -> None:
+    stage_band(service, token, 2, 1, freq_hz=200, gain_db=4.0, enabled=False)
+    stage_band(service, token, 2, 3, freq_hz=2000, gain_db=-3.0, enabled=True)
+    result = state(service, token)
+    disabled, enabled = handle(result, "eq:1"), handle(result, "eq:3")
+    assert disabled["enabled"] is False and enabled["enabled"] is True
+    plot = result["plot"]
+    curve_at_200 = plot["draft_db"][plot["freq"].index(200.0)]
+    assert curve_at_200 == pytest.approx(0.0, abs=0.1)  # the disabled band adds nothing to the curve
+    assert disabled["db"] == pytest.approx(curve_at_200 + 4.0, abs=0.01)
+    assert enabled["db"] == pytest.approx(-3.0, abs=0.1)
+    assert card(result, "eq:1")["enabled"] is False
+
+
+def test_a_disabled_allpass_handle_sits_on_the_curve(service: DSPService, token: str) -> None:
+    stage_band(service, token, 2, 0, freq_hz=300, type=4, enabled=False)
+    plot = state(service, token)["plot"]
+    assert plot["handles"][0]["enabled"] is False
+    assert plot["handles"][0]["db"] == pytest.approx(plot["draft_db"][plot["freq"].index(300.0)], abs=0.01)
+
+
+def test_crossover_handles_are_enabled_and_slopes_mark_unresolved_values(service: DSPService, token: str) -> None:
+    key = ControlKey(True, 2, "hp")
+    service.stage(token, key, replace(controls(service.view(token).draft)[key], enabled=True))
+    result = state(service, token)
+    assert handle(result, "hp")["enabled"] is True
+    slope = field(card(result, "hp"), "slope_db_per_oct")
+    assert not any(o.get("unresolved") for o in slope["options"])
+
+
+# Latency
+
+def test_latency_of_a_flat_path_is_the_base() -> None:
+    assert path_latency(Stage("Out 1", 0.0), [Stage("In A", 0.0)]) == (1.732, 1.732)
+
+
+def test_latency_adds_the_output_delay_and_a_routed_inputs_delay() -> None:
+    assert path_latency(Stage("Out 1", 2.5), [Stage("In A", 0.0)]) == pytest.approx((4.232, 4.232))
+    assert path_latency(Stage("Out 1", 2.5), [Stage("In A", 1.0)]) == pytest.approx((5.232, 5.232))
+
+
+def test_latency_of_a_256_tap_fir_on_the_output() -> None:
+    assert fir_latency_ms(256) == pytest.approx(2.662, abs=0.0005)
+    assert fir_latency_ms(512) == pytest.approx(3.995, abs=0.0005)
+    low, high = path_latency(Stage("Out 1", 0.0, fir_latency_ms(256)), [Stage("In A", 0.0)])
+    assert low == high == pytest.approx(1.732 + 2.662, abs=0.0005)
+
+
+def test_latency_of_two_routed_inputs_with_different_delays_is_a_range() -> None:
+    assert path_latency(Stage("Out 1", 2.0), [Stage("In A", 0.0), Stage("In B", 0.5)]) == pytest.approx((3.732, 4.232))
+
+
+def test_latency_with_no_routed_input_is_the_output_alone() -> None:
+    assert path_latency(Stage("Out 3", 2.5), []) == pytest.approx((4.232, 4.232))
+
+
+def test_latency_of_an_input_is_its_own_part_only() -> None:
+    assert path_latency(Stage("In A", 1.0, fir_latency_ms(512)), None) == pytest.approx((4.995, 4.995))
+
+
+def test_selected_bar_latency_follows_the_draft(service: DSPService, token: str) -> None:
+    service.stage(token, ControlKey(True, 0, "delay"), 2.5)
+    service.stage(token, ControlKey(False, 0, "delay"), 1.0)
+    latency = state(service, token, selected=(True, 0))["selected"]["latency"]
+    assert latency["text"] == "Latency 5.23 ms"
+    lines = latency["detail"].splitlines()
+    assert "Base: 1.732 ms" in lines[0]
+    assert any("Out 1 delay: 2.500 ms" in line for line in lines)
+    assert any("In A" in line and "1.000 ms" in line for line in lines)
+    detail = latency["detail"]
+    assert "not included" in detail and "Group delay" in detail and "0.667 ms" in detail
+    assert "input A to output 1" in detail
+
+
+def test_selected_bar_latency_ranges_and_unrouted_outputs(service: DSPService, token: str) -> None:
+    service.stage(token, ControlKey(False, 2, "delay"), 0.5)  # In C feeds Out 5 and Out 6 in the demo
+    service.stage(token, ControlKey(False, 0, "route", 4), True)  # In A now feeds Out 5 too
+    assert state(service, token, selected=(True, 4))["selected"]["latency"]["text"] == "Latency 1.73-2.23 ms"
+    unrouted = state(service, token, selected=OUT3)["selected"]["latency"]
+    assert unrouted["text"] == "Latency 1.73 ms, no input routed"
+    assert "No input is routed" in unrouted["detail"]
+
+
+def test_selected_bar_latency_of_an_input_and_an_enabled_fir(service: DSPService, token: str) -> None:
+    key = ControlKey(False, 0, "fir")
+    fir = FIRParameters.read(controls(service.view(token).draft)[key])  # order index 1: 512 taps
+    service.stage(token, key, replace(fir, enabled=True).snapshot(output=False))
+    latency = state(service, token, selected=IN_A)["selected"]["latency"]
+    assert latency["text"] == "This input adds 4.00 ms"
+    assert "In A FIR, 512 taps: 3.995 ms" in latency["detail"]
+    assert "1.732" not in latency["detail"].splitlines()[0]

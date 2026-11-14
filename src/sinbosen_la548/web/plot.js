@@ -1,5 +1,5 @@
 // The response plot: magnitude over a log frequency axis, with optional phase and group-delay panels under it, and
-// one handle per enabled crossover and EQ band in use. Drawing and the maths that turn pointer, wheel and key input
+// one handle per enabled crossover and EQ band in use (greyed while the band is disabled). Drawing and the maths that turn pointer, wheel and key input
 // into field values live here; posting them is the caller's job (see `createPlot`'s hooks).
 //
 // Geometry follows the mockup's <svg>: 1320 x 260 drawing units for the magnitude panel, 20 Hz at x = 0 and 20 kHz
@@ -26,7 +26,10 @@ const MINOR_HZ = [50, 200, 500, 2000, 5000];
 const MAJOR_HZ = [100, 1000, 10000];
 const HANDLE_RADIUS = 9;
 const DRAG_THRESHOLD_PX = 3;
-const Q_PER_NOTCH = 1.05;
+const Q_PER_100PX = 1.05 ** 2;  // Q changes by this factor per 100 px of wheel or two-finger scroll
+const WHEEL_PX = [1, 100 / 3, 100];  // pixels per deltaMode unit: pixel, line, page
+const WHEEL_MAX_PX = 200;  // the most one wheel event counts, so a hard flick cannot sweep Q across its range
+const SLOPE_STEP_PX = 18;  // vertical travel per crossover slope step
 const OCTAVE_STEP = 1 / 24;
 const LEGEND_CHAR = 5.8;  // average width of an 11-unit Inter character, for laying out the legend
 
@@ -34,6 +37,20 @@ const LEGEND_CHAR = 5.8;  // average width of an 11-unit Inter character, for la
 export function dragFrequency(value) {
   if (!Number.isFinite(value)) throw new Error("frequency must be finite");
   return Math.min(20000, Math.max(10, Math.floor(value + 0.5)));
+}
+
+// The Q after one wheel event: in proportion to the scroll distance, at most WHEEL_MAX_PX of it, within `bounds`.
+export function wheelQ(q, deltaY, deltaMode, bounds) {
+  const px = clamp(-deltaY * (WHEEL_PX[deltaMode] ?? 1), [-WHEEL_MAX_PX, WHEEL_MAX_PX]);
+  return round(clamp(q * Q_PER_100PX ** (px / 100), bounds), 3);
+}
+
+// The slope `steps` options steeper (negative: gentler) than `current`, clamped at the ends of `slopes` (ascending).
+// A value outside the list starts from its nearest option.
+export function stepSlope(slopes, current, steps) {
+  const distance = (i) => Math.abs(slopes[i] - current);
+  const from = slopes.reduce((best, _, i) => (distance(i) < distance(best) ? i : best), 0);
+  return slopes[clamp(from + steps, [0, slopes.length - 1])];
 }
 
 const xOf = (hz) => Math.min(WIDTH, Math.max(0, (WIDTH * Math.log10(hz / LOW_HZ)) / DECADES));
@@ -197,7 +214,14 @@ function valueText(values) {
   const parts = [`${values.freq_hz} Hz`];
   if (values.gain_db !== undefined) parts.push(`${minus(values.gain_db.toFixed(1))} dB`);
   if (values.q !== undefined) parts.push(`Q ${values.q.toFixed(2)}`);
+  if (values.slope_db_per_oct !== undefined) parts.push(`${values.slope_db_per_oct} dB/oct`);
   return parts.join(", ");
+}
+
+// The slope options a crossover's card offers, ascending, leaving out a value the server could not resolve.
+function slopesOf(filter) {
+  const field = fieldOf(filter, "slope_db_per_oct");
+  return field ? field.options.filter((o) => !o.unresolved).map((o) => o.value).sort((a, b) => a - b) : null;
 }
 
 export function createPlot(container, hooks) {
@@ -214,7 +238,7 @@ export function createPlot(container, hooks) {
   function valuesOf(key) {
     const filter = current.filters.find((f) => f.key === key);
     const values = {};
-    for (const name of ["freq_hz", "gain_db", "q"]) {
+    for (const name of ["freq_hz", "gain_db", "q", "slope_db_per_oct"]) {
       const field = fieldOf(filter, name);
       if (field) values[name] = field.value;
     }
@@ -231,12 +255,16 @@ export function createPlot(container, hooks) {
     return matrix ? new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix) : { x: 0, y: 0 };
   }
 
+  // Sideways is frequency; up and down is gain for a band with gain, and slope for a crossover (down is steeper).
   function dragValues(event) {
     const at = point(event);
-    const { key, values0, start, hasGain } = drag;
+    const { key, values0, start, hasGain, slopes } = drag;
     const values = { freq_hz: dragFrequency(hzAt(xOf(values0.freq_hz) + at.x - start.x)) };
     if (hasGain) {
       values.gain_db = round(clamp(values0.gain_db - (at.y - start.y) / drag.scale, bounds(key, "gain_db")), 1);
+    } else if (slopes) {
+      const steps = Math.trunc((event.clientY - drag.client[1]) / SLOPE_STEP_PX);
+      values.slope_db_per_oct = stepSlope(slopes, values0.slope_db_per_oct, steps);
     }
     return values;
   }
@@ -256,12 +284,15 @@ export function createPlot(container, hooks) {
     const key = el.dataset.key;
     const handle = current.plot.handles.find((h) => h.key === key);
     const values0 = valuesOf(key);
+    const hasGain = handle.has_gain && values0.gain_db !== undefined;
+    const slopes = !hasGain && values0.slope_db_per_oct !== undefined
+      ? slopesOf(current.filters.find((f) => f.key === key)) : null;
     drag = { key, pointerId: event.pointerId, start: point(event), client: [event.clientX, event.clientY], values0,
-      values: null, moved: false, hasGain: handle.has_gain && values0.gain_db !== undefined, scale: current.scale,
-      range: current.range };
+      values: null, moved: false, hasGain, slopes, scale: current.scale, range: current.range };
     el.setPointerCapture(event.pointerId);
     const before = { freq_hz: values0.freq_hz };
-    if (drag.hasGain) before.gain_db = values0.gain_db;
+    if (hasGain) before.gain_db = values0.gain_db;
+    if (slopes) before.slope_db_per_oct = values0.slope_db_per_oct;
     hooks.begin(key, before);
     event.preventDefault();
     el.focus({ preventScroll: true });
@@ -294,7 +325,7 @@ export function createPlot(container, hooks) {
     endDrag(el ?? svg, true);
   }, true);
 
-  // The wheel over a handle changes Q by 5% per notch and never scrolls the page. The blocking listener sits on the
+  // The wheel over a handle changes Q (see wheelQ) and never scrolls the page. The blocking listener sits on the
   // handles only, so the wheel over the rest of the plot stays on the browser's fast scroll path.
   handleLayer.addEventListener("wheel", (event) => {
     const el = event.target.closest(".handle");
@@ -303,8 +334,7 @@ export function createPlot(container, hooks) {
     const key = el.dataset.key;
     const q = valuesOf(key).q;
     if (q === undefined || drag) return;
-    const notches = -event.deltaY / [100, 3, 1][event.deltaMode];
-    const next = round(clamp(q * Q_PER_NOTCH ** notches, bounds(key, "q")), 3);
+    const next = wheelQ(q, event.deltaY, event.deltaMode, bounds(key, "q"));
     if (next !== q) hooks.nudge(key, { q: next });
   }, { passive: false });
 
@@ -326,6 +356,11 @@ export function createPlot(container, hooks) {
       const step = (event.shiftKey ? 1 : 0.1) * (event.key === "ArrowUp" ? 1 : -1);
       const db = round(clamp(values.gain_db + step, bounds(key, "gain_db")), 1);
       if (db !== values.gain_db) change = { gain_db: db };
+    } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && values.slope_db_per_oct !== undefined) {
+      // As when dragging: up is gentler, down is steeper.
+      const slopes = slopesOf(current.filters.find((f) => f.key === key));
+      const slope = stepSlope(slopes, values.slope_db_per_oct, event.key === "ArrowUp" ? -1 : 1);
+      if (slope !== values.slope_db_per_oct) change = { slope_db_per_oct: slope };
     } else {
       return;
     }
@@ -353,7 +388,10 @@ export function createPlot(container, hooks) {
       const db = (handle.db ?? 0) + (editing && handle.has_gain ? (values.gain_db ?? stateGain) - stateGain : 0);
       el.setAttribute("transform", `translate(${xOf(hz).toFixed(1)} ${clamp(y(db), [0, MAG_HEIGHT]).toFixed(1)})`);
       el.classList.toggle("pending", handle.pending || editing);
+      el.classList.toggle("disabled", handle.enabled === false);
       el.setAttribute("aria-label", handle.label);
+      if (handle.enabled === false) el.setAttribute("aria-description", "Disabled");
+      else el.removeAttribute("aria-description");
       el.setAttribute("aria-valuenow", String(values.freq_hz));
       el.setAttribute("aria-valuemin", "10");
       el.setAttribute("aria-valuemax", "20000");

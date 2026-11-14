@@ -3,10 +3,10 @@
 // page, so focus, caret and open dropdowns survive the once-a-second refresh.
 
 import { ApiError, getState, post } from "./api.js";
+import { createHandleGestures, targetOf } from "./handles.js";
 import { createPlot } from "./plot.js";
 
 const POLL_MS = 1000;
-const EDIT_INTERVAL_MS = 40;  // the most often a handle gesture posts /api/edit
 const HINT = "Gain, polarity and mute take effect immediately.";
 const HINT_DRAFT = "Filters and delay wait for Apply.";
 const HINT_LIVE = "Filters and delay are sent as you edit.";
@@ -41,6 +41,7 @@ const ui = {
   serverDown: null,
   menuBefore: null,    // the menu open before the current click
   handle: null,        // {key, target, before, values, dragging}: a plot handle being dragged, wheeled or nudged
+  naming: null,        // the id of the channel whose name is being edited in its strip
   selectedCard: null,  // {channel, key}: the card whose handle was clicked
 };
 let fields = new Map();   // data-field -> field spec, rebuilt on every render
@@ -49,9 +50,8 @@ let sequence = 0;
 let shown = 0;
 let busy = 0;
 let plot = null;
-// Values waiting to be posted, per channel and handle, so a gesture on another handle never drops the last one's.
-const handleEdits = { queued: new Map(), timer: null, flushing: false, last: 0, sent: false };
-const queueKey = () => `${ui.handle.target.id} ${ui.handle.key}`;
+const gestures = createHandleGestures({ ui, selected: () => state.selected, request, render });
+const { editing } = gestures;
 
 // DOM building and patching
 
@@ -261,99 +261,6 @@ async function commit(el) {
   }
 }
 
-// Plot handles. A gesture keeps its values in `ui.handle` so the handle and its card show them at once; they are
-// posted at most every EDIT_INTERVAL_MS, one request at a time so the server sees them in order, and the gesture ends
-// once the last one is answered.
-
-function targetOf(filter) {
-  return { id: state.selected.id, kind: filter.kind, ...(filter.kind === "eq" ? { index: filter.index } : {}) };
-}
-
-function queueHandleEdit(values) {
-  handleEdits.queued.set(queueKey(), { target: ui.handle.target, values });
-  if (handleEdits.flushing || handleEdits.timer) return;
-  const wait = Math.max(0, handleEdits.last + EDIT_INTERVAL_MS - performance.now());
-  handleEdits.timer = setTimeout(flushHandleEdits, wait);
-}
-
-async function flushHandleEdits() {
-  handleEdits.timer = null;
-  const [key, next] = handleEdits.queued.entries().next().value ?? [];
-  if (next) {
-    handleEdits.queued.delete(key);
-    handleEdits.flushing = true;
-    handleEdits.last = performance.now();
-    handleEdits.sent = true;
-    try {
-      await request("/api/edit", { ...next.target, values: next.values });
-    } catch (error) {
-      ui.errors.push(error instanceof ApiError ? error.message : String(error));
-    } finally {
-      handleEdits.flushing = false;
-    }
-  }
-  if (handleEdits.queued.size) {
-    handleEdits.timer = setTimeout(flushHandleEdits,
-      Math.max(0, handleEdits.last + EDIT_INTERVAL_MS - performance.now()));
-  } else if (ui.handle && !ui.handle.dragging) {
-    ui.handle = null;
-    render();
-  }
-}
-
-// True when `ui.handle` is a gesture on this handle of the selected channel.
-const editing = (key) => ui.handle?.key === key && ui.handle.target.id === state.selected.id;
-
-function startHandleEdit(key, before, dragging) {
-  const filter = state.selected.filters.find((f) => f.key === key);
-  if (!editing(key)) {
-    ui.handle = { key, target: targetOf(filter), before, values: {}, dragging };
-    handleEdits.sent = false;
-  } else {
-    ui.handle.dragging = dragging;
-    ui.handle.before = before;
-  }
-}
-
-const plotHooks = {
-  begin(key, before) {
-    startHandleEdit(key, before, true);
-  },
-  change(key, values) {
-    ui.handle.values = { ...ui.handle.values, ...values };
-    queueHandleEdit(ui.handle.values);
-    render();
-  },
-  end(key, values) {
-    ui.handle.values = { ...ui.handle.values, ...values };
-    ui.handle.dragging = false;
-    queueHandleEdit(ui.handle.values);
-    render();
-  },
-  cancel() {
-    // One post puts back what the drag changed, replacing whatever was still waiting to be sent.
-    ui.handle.values = { ...ui.handle.values, ...ui.handle.before };
-    ui.handle.dragging = false;
-    if (handleEdits.sent) queueHandleEdit(ui.handle.before);
-    else handleEdits.queued.delete(queueKey());
-    if (!handleEdits.flushing && !handleEdits.timer) flushHandleEdits();
-    render();
-  },
-  select(key) {
-    ui.handle = handleEdits.flushing || handleEdits.timer ? { ...ui.handle, dragging: false } : null;
-    ui.selectedCard = { channel: state.selected.id, key };
-    render();
-    document.querySelector(`[data-key="card:${CSS.escape(key)}"] .card-row :is(input, select):not(:disabled)`)
-      ?.focus();
-  },
-  nudge(key, values) {
-    if (!editing(key)) startHandleEdit(key, null, false);
-    ui.handle.values = { ...ui.handle.values, ...values };
-    queueHandleEdit(ui.handle.values);
-    render();
-  },
-};
-
 function connect() {
   ui.connecting = true;
   render();
@@ -453,6 +360,42 @@ function errorBar() {
   ];
 }
 
+// The strip header selects its channel. The name may be wider than its box: it then covers the fixed label, up to the
+// strip's width. Double-clicking the name, or Enter or F2 on the header, edits it in place.
+function stripHead(channel) {
+  const { label, nickname } = channel;
+  const fieldId = `nick:${channel.id}`;
+  return h("div", { class: "strip-head" },
+    h("button", { type: "button", class: "strip-select", "aria-label": nickname ? `${label}, ${nickname}` : label,
+      title: label, "aria-current": channel.selected ? "true" : false, "data-channel": channel.id,
+      "data-action": act(() => send("/api/select", { id: channel.id })) },
+    h("span", { class: "strip-label" }, label),
+    h("span", { class: cls("strip-name", !nickname && "empty") }, nickname || "Name")),
+    ui.naming === channel.id || ui.typing?.id === fieldId ? textInput({
+      id: fieldId, label: `${label} nickname`, display: nickname, placeholder: "Name", className: "nickname",
+      parse: (text) => text.trim(), path: "/api/nickname", body: (name) => ({ id: channel.id, name }),
+    }) : null);
+}
+
+// A name too wide to sit beside the label covers the whole header, so no sliver of the label shows next to it.
+function coverLabels() {
+  for (const name of document.querySelectorAll("#strips .strip-name")) {
+    const label = name.previousElementSibling;
+    name.classList.remove("covers");  // measured at its own width
+    name.classList.toggle("covers", name.scrollWidth > name.parentElement.clientWidth - label.offsetWidth - 4);
+  }
+}
+
+function startNaming(id) {
+  ui.naming = id;
+  render();
+  const field = document.querySelector(`[data-field="nick:${CSS.escape(id)}"]`);
+  field?.focus();
+  field?.select();
+}
+
+const focusStrip = (id) => document.querySelector(`.strip-select[data-channel="${CSS.escape(id)}"]`)?.focus();
+
 function strip(channel) {
   const link = channel.link;
   const label = channel.label;
@@ -460,14 +403,7 @@ function strip(channel) {
     class: cls("strip", channel.id.startsWith("out:") ? "output" : "input", channel.selected && "selected"),
     "data-key": channel.id,
   },
-  h("div", { class: "strip-head" },
-    h("button", { type: "button", class: "strip-label", "aria-current": channel.selected ? "true" : false,
-      "data-action": act(() => send("/api/select", { id: channel.id })) }, label),
-    textInput({
-      id: `nick:${channel.id}`, label: `${label} nickname`, display: channel.nickname, placeholder: "Name",
-      className: "nickname", parse: (text) => text.trim(), path: "/api/nickname",
-      body: (name) => ({ id: channel.id, name }),
-    })),
+  stripHead(channel),
   h("div", { class: "strip-pair" },
     textInput({
       id: `gain:${channel.id}`, label: `${label} gain in dB`, number: true, unit: "dB", title: "Gain (dB)",
@@ -505,9 +441,13 @@ function hint() {
 function selectedBar() {
   const selected = state.selected;
   const channel = state.channels.find((c) => c.id === selected.id);
+  const latency = selected.latency;
   const items = [h("div", { class: "selected-name" },
     selected.nickname ? h("span", { class: "nick" }, selected.nickname) : null,
-    h("span", { class: "label" }, selected.label))];
+    h("span", { class: "label" }, selected.label)),
+  // A server started before the readout existed sends no latency; the page still works against it.
+  latency ? h("div", { class: "latency", title: latency.detail, "aria-description": latency.detail }, latency.text)
+    : null];
   const link = selected.link;
   if (link) {
     const others = link.members.filter((m) => m.id !== selected.id).map((m) => m.nickname || m.label);
@@ -539,11 +479,13 @@ function selectedBar() {
 function cardControl(filter, field, target) {
   const name = `${filter.title} ${FIELD_NAMES[field.key] ?? field.label}`;
   if (field.kind === "select") {
+    // A crossover handle dragged up or down changes the slope; the select follows it.
+    const value = (editing(filter.key) ? ui.handle.values[field.key] : undefined) ?? field.value;
     return h("select", {
       class: cls("field", field.pending && "pending"), "aria-label": name, disabled: !field.editable,
-      "data-value": String(field.value),
+      "data-value": String(value),
       "data-action": act((el) => send("/api/edit", { ...target, field: field.key, value: Number(el.value) })),
-    }, field.options.map((o) => h("option", { value: String(o.value), selected: o.value === field.value,
+    }, field.options.map((o) => h("option", { value: String(o.value), selected: o.value === value,
       title: SHORT_OPTIONS[o.label] ? o.label : false, "aria-label": SHORT_OPTIONS[o.label] ? o.label : false },
     SHORT_OPTIONS[o.label] ?? o.label)));
   }
@@ -560,7 +502,7 @@ function cardControl(filter, field, target) {
 
 function filterCard(filter) {
   const id = state.selected.id;
-  const target = targetOf(filter);
+  const target = targetOf(id, filter);
   const selected = ui.selectedCard?.channel === id && ui.selectedCard.key === filter.key;
   return h("div", {
     class: cls("card", filter.pending && "pending", !filter.enabled && "off", selected && "selected"),
@@ -707,10 +649,11 @@ function render() {
   patch("topbar", topBar());
   patch("errors", errorBar());
   patch("strips", state.channels.map(strip));
+  coverLabels();
   patch("hint", hint());
   patch("selected-bar", selectedBar());
   patch("cards", cards());
-  plot ??= createPlot(document.getElementById("plot"), plotHooks);
+  plot ??= createPlot(document.getElementById("plot"), gestures.hooks);
   plot.draw(state.plot, state.selected.filters, ui.handle?.target.id === state.selected.id ? ui.handle : null);
   patch("overlay", overlay());
   if (ui.focusMenu) {
@@ -759,20 +702,51 @@ document.addEventListener("keydown", (event) => {
       ui.menu = null;
       render();
       anchor?.focus();
-    } else if (isTextField(el) && ui.typing?.id === el.dataset.field) {
+    } else if (isTextField(el) && (ui.typing?.id === el.dataset.field || el.dataset.field === `nick:${ui.naming}`)) {
+      const naming = ui.naming;
       ui.typing = null;
+      ui.naming = null;
       render();
+      if (naming) focusStrip(naming);
     }
   } else if (event.key === "Enter") {
-    if (el.dataset.local === "address") connect();
-    else if (isTextField(el)) commit(el);
-    else return;
+    if (el.dataset.local === "address") {
+      connect();
+    } else if (isTextField(el) && el.dataset.field === `nick:${ui.naming}`) {
+      const naming = ui.naming;
+      ui.naming = null;  // the field stays while its value is being sent, or refused
+      commit(el).then(() => {
+        render();
+        if (!document.querySelector(`[data-field="nick:${CSS.escape(naming)}"]`)) focusStrip(naming);
+      });
+    } else if (isTextField(el)) {
+      commit(el);
+    } else if (el.matches(".strip-select")) {
+      startNaming(el.dataset.channel);
+    } else {
+      return;
+    }
     event.preventDefault();
+  } else if (event.key === "F2" && el.matches(".strip-select")) {
+    event.preventDefault();
+    startNaming(el.dataset.channel);
   }
 });
 
+document.addEventListener("dblclick", (event) => {
+  const name = event.target.closest(".strip-name");
+  if (name) startNaming(name.closest(".strip-select").dataset.channel);
+});
+
 document.addEventListener("focusout", (event) => {
-  if (isTextField(event.target)) commit(event.target);
+  const el = event.target;
+  if (!isTextField(el)) return;
+  if (el.dataset.field === `nick:${ui.naming}`) {
+    // Leaving the name field commits it; the field closes once nothing is left to send.
+    ui.naming = null;
+    if (ui.typing?.id !== el.dataset.field) render();
+  }
+  commit(el);
 });
 
 window.addEventListener("resize", () => patch("overlay", overlay()));

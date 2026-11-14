@@ -78,6 +78,15 @@ class Studio:
         self.page.get_by_role("button", name=re.compile("^Add band")).click()
         self.handle("EQ 1").wait_for()
 
+    def name(self, label: str, name: str) -> None:
+        """Give a strip a nickname: double-click its name, type, and leave the field."""
+        self.page.locator(".strip", has=self.page.get_by_role("button", name=label, exact=True)) \
+            .locator(".strip-name").dblclick()
+        field = self.field(f"{label} nickname")
+        field.fill(name)
+        with self.page.expect_response("**/api/nickname"):
+            field.press("Enter")
+
     def server_state(self) -> dict[str, Any]:
         return dict(self.page.evaluate("fetch('/api/state').then(response => response.json())"))
 
@@ -256,14 +265,12 @@ def test_delay_is_a_draft(studio: Studio) -> None:
 
 
 def test_nickname_survives_reload(studio: Studio) -> None:
-    nickname = studio.field("Out 3 nickname")
-    nickname.fill("Mid L")
-    with studio.page.expect_response("**/api/nickname"):
-        nickname.press("Tab")
+    studio.name("Out 3", "Mid L")
     studio.load()
-    assert studio.field("Out 3 nickname").input_value() == "Mid L"
-    studio.select("Out 3")
-    assert studio.page.locator("#selected-bar").get_by_text("Mid L", exact=True).is_visible()
+    head = studio.page.get_by_role("button", name="Out 3, Mid L", exact=True)
+    assert head.locator(".strip-name").inner_text() == "Mid L"
+    head.click()
+    studio.page.locator("#selected-bar").get_by_text("Mid L", exact=True).wait_for()
 
 
 def test_link_menu_creates_and_joins_groups(studio: Studio) -> None:
@@ -451,13 +458,19 @@ def test_wheel_over_a_handle_changes_q_and_does_not_scroll(studio: Studio) -> No
     x, y = studio.centre(studio.handle("EQ 1"))
     studio.page.mouse.move(x, y)
     studio.page.mouse.wheel(0, -100)
-    studio.until("EQ 1 Q", "value", "1.05")
+    studio.until("EQ 1 Q", "value", "1.10")  # 10% per 100 px of scroll
     studio.page.mouse.wheel(0, 100)
     studio.until("EQ 1 Q", "value", "1.00")
+    studio.page.mouse.wheel(0, -10)  # a two-finger nudge: in proportion to the distance
+    studio.until("EQ 1 Q", "value", "1.01")
+    studio.page.mouse.wheel(0, -5000)  # a hard flick moves Q by at most two 100 px steps
+    studio.page.wait_for_function("() => document.querySelector('[aria-label=\"EQ 1 Q\"]').value !== '1.01'")
+    studio.page.wait_for_timeout(300)
+    assert 1.15 < float(studio.field("EQ 1 Q").input_value()) < 1.3
     studio.page.mouse.move(x - 300, y + 60)
     studio.page.mouse.wheel(0, 100)
-    studio.page.wait_for_function("() => window.wheels.length === 3")
-    assert studio.page.evaluate("window.wheels") == [True, True, False]
+    studio.page.wait_for_function("() => window.wheels.length === 5")
+    assert studio.page.evaluate("window.wheels") == [True, True, True, True, False]
 
 
 def test_clicking_a_handle_selects_its_card(studio: Studio) -> None:
@@ -700,3 +713,145 @@ def test_disconnecting_without_unapplied_edits_does_not_ask(connected_studio: St
     connected_studio.page.locator("#connection").click()
     with connected_studio.page.expect_response("**/api/disconnect"):
         connected_studio.page.get_by_role("button", name="Disconnect", exact=True).click()
+
+
+# The owner's requests after the first demo
+
+def test_the_page_opens_with_out_1_selected(studio: Studio) -> None:
+    strip = studio.page.locator(".strip", has=studio.page.get_by_role("button", name="Out 1", exact=True))
+    assert "selected" in (strip.get_attribute("class") or "")
+    assert studio.page.locator("#selected-bar .selected-name").inner_text() == "Out 1"
+
+
+def test_a_disabled_band_keeps_a_greyed_handle_that_can_be_dragged(studio: Studio) -> None:
+    studio.add_band()
+    gain = studio.field("EQ 1 gain")
+    gain.fill("6")
+    with studio.page.expect_response("**/api/edit"):
+        gain.press("Enter")
+    with studio.page.expect_response("**/api/edit"):
+        studio.page.get_by_role("group", name="EQ 1").get_by_role("checkbox").uncheck()
+    handle = studio.handle("EQ 1")
+    studio.page.wait_for_function("() => document.querySelector('#plot [data-key=\"eq:0\"]')"
+                                  ".classList.contains('disabled')")
+    assert handle.text_content() == "1"
+    assert "off" in (studio.page.locator("[data-key='card:eq:0']").get_attribute("class") or "")
+    plot = studio.server_state()["plot"]
+    assert plot["handles"][0]["enabled"] is False
+    assert plot["handles"][0]["db"] == pytest.approx(6.0, abs=0.2)
+    assert max(v for v in plot["draft_db"] if v is not None) < 0.5  # the disabled band is not in the curve
+    x, y = studio.centre(handle)
+    mouse = studio.page.mouse
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x - 150, y, steps=10)
+    mouse.up()
+    studio.page.wait_for_function("() => Number(document.querySelector('[aria-label=\"EQ 1 frequency\"]').value) < 600")
+    studio.page.wait_for_timeout(300)
+    band = studio.server_state()["selected"]["filters"][2]
+    assert band["enabled"] is False and band["fields"][1]["value"] < 600
+
+
+def test_a_long_nickname_covers_the_label_up_to_the_strip_width(studio: Studio) -> None:
+    studio.name("Out 3", "Midrange Left Upper Horn")
+    head = studio.page.get_by_role("button", name="Out 3, Midrange Left Upper Horn", exact=True)
+    head.wait_for()
+    assert head.get_attribute("title") == "Out 3"
+    box = head.evaluate("""el => {
+        const r = (e) => e.getBoundingClientRect();
+        const name = el.querySelector('.strip-name'), label = el.querySelector('.strip-label');
+        return {head: [r(el).left, r(el).right], name: [r(name).left, r(name).right],
+                label: r(label).right, clipped: name.scrollWidth > name.clientWidth,
+                ellipsis: getComputedStyle(name).textOverflow};
+    }""")
+    assert box["name"][0] == pytest.approx(box["head"][0], abs=1)
+    assert box["name"][1] == pytest.approx(box["head"][1], abs=1)
+    assert box["name"][0] < box["label"]  # over the fixed label
+    assert box["clipped"] and box["ellipsis"] == "ellipsis"
+    studio.name("Out 4", "Sub")
+    short = studio.page.get_by_role("button", name="Out 4, Sub", exact=True).evaluate(
+        "el => el.querySelector('.strip-name').getBoundingClientRect().left"
+        " >= el.querySelector('.strip-label').getBoundingClientRect().right")
+    assert short
+
+
+def test_the_strip_name_selects_on_click_and_edits_on_double_click(studio: Studio) -> None:
+    page = studio.page
+    head = page.get_by_role("button", name="Out 3", exact=True)
+    name = head.locator(".strip-name")
+    assert name.evaluate("el => getComputedStyle(el).opacity") == "0"  # the "Name" affordance is hidden
+    head.hover()
+    page.wait_for_function("() => [...document.querySelectorAll('.strip-name')].some("
+                           "el => getComputedStyle(el).opacity !== '0')")
+    name.click()
+    page.locator("#selected-bar .selected-name").get_by_text("Out 3", exact=True).wait_for()
+    assert studio.field("Out 3 nickname").count() == 0
+    name.dblclick()
+    field = studio.field("Out 3 nickname")
+    assert field.evaluate("el => el === document.activeElement")
+    field.fill("Scratch")
+    field.press("Escape")
+    field.wait_for(state="detached")
+    assert page.get_by_role("button", name="Out 3", exact=True).locator(".strip-name").inner_text() == "Name"
+    head.focus()
+    head.press("F2")
+    studio.field("Out 3 nickname").fill("Mid L")
+    with page.expect_response("**/api/nickname"):
+        studio.field("Out 3 nickname").press("Enter")
+    page.get_by_role("button", name="Out 3, Mid L", exact=True).wait_for()
+    studio.field("Out 3 nickname").wait_for(state="detached")
+    page.get_by_role("button", name="Out 3, Mid L", exact=True).press("Enter")
+    studio.field("Out 3 nickname").fill("Mid R")
+    with page.expect_response("**/api/nickname"):
+        page.locator("#plot").click(position={"x": 5, "y": 5})  # leaving the field commits it
+    page.get_by_role("button", name="Out 3, Mid R", exact=True).wait_for()
+
+
+def test_dragging_a_crossover_handle_down_steepens_its_slope(studio: Studio) -> None:
+    studio.select("Out 3")
+    with studio.page.expect_response("**/api/edit"):
+        studio.page.get_by_role("group", name="High-pass").get_by_role("checkbox").check()
+    hp = studio.server_state()["selected"]["filters"][0]
+    hz0, slope0 = hp["fields"][0]["value"], hp["fields"][2]["value"]
+    assert slope0 <= 36
+    posts: list[str] = []
+    studio.page.on("request", lambda request: posts.append(request.post_data or "")
+                   if "/api/edit" in request.url else None)
+    x, y = studio.centre(studio.handle("High-pass"))
+    mouse = studio.page.mouse
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x + 100, y + 40, steps=8)  # 40 px down: two 6 dB/oct steps steeper
+    studio.until("High-pass slope", "value", str(slope0 + 12))
+    mouse.up()
+    studio.page.wait_for_timeout(400)
+    hp = studio.server_state()["selected"]["filters"][0]
+    assert hp["fields"][2]["value"] == slope0 + 12 and hp["fields"][0]["value"] > hz0
+    both = [json.loads(p)["values"] for p in posts]
+    assert any("freq_hz" in v and "slope_db_per_oct" in v for v in both), both
+    handle = studio.handle("High-pass")
+    handle.focus()
+    handle.press("ArrowUp")
+    studio.until("High-pass slope", "value", str(slope0 + 6))
+    for _ in range(10):
+        handle.press("ArrowDown")
+    studio.until("High-pass slope", "value", "48")  # clamped at the steepest
+    studio.page.wait_for_timeout(300)
+    assert studio.server_state()["selected"]["filters"][0]["fields"][2]["value"] == 48
+
+
+def test_the_selected_bar_shows_the_paths_latency(studio: Studio) -> None:
+    latency = studio.page.locator("#selected-bar .latency")
+    assert latency.inner_text() == "Latency 1.73 ms"  # Out 1, fed by In A
+    studio.select("Out 3")
+    latency.get_by_text("Latency 1.73 ms, no input routed").wait_for()
+    delay = studio.field("Out 3 delay in ms")
+    delay.fill("2.5")
+    with studio.page.expect_response("**/api/edit"):
+        delay.press("Enter")
+    latency.get_by_text("Latency 4.23 ms, no input routed").wait_for()
+    detail = latency.get_attribute("title") or ""
+    assert "Out 3 delay: 2.500 ms" in detail and "Group delay" in detail and "0.667 ms" in detail
+    assert latency.get_attribute("aria-description") == detail
+    studio.select("In A")
+    latency.get_by_text("This input adds 0.00 ms").wait_for()

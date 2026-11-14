@@ -18,7 +18,8 @@ uv run --extra ui sinbosen-la548-ui
 
 Open the URL it prints, <http://127.0.0.1:7860> by default. `--port` changes
 the port. `--demo` is accepted but the app always starts in offline demo, using
-the bundled fixture. Ctrl-C stops it and closes the device connection.
+the bundled fixture, with Out 1 selected. Ctrl-C stops it and closes the device
+connection.
 
 The server binds to `127.0.0.1`. It only accepts requests whose Host is a
 loopback name (or the one given to `--host`), refuses requests carrying another
@@ -37,11 +38,12 @@ prints a warning.
   **Disconnect** and **Offline demo**. Then the Tune tab, the **Live** toggle,
   the count of unapplied changes, **Revert** and **Apply**.
 - **Channel strips.** All 4 inputs (`In A` to `In D`) and 8 outputs (`Out 1` to
-  `Out 8`) in one row. Clicking a strip's label selects that channel. Each strip
-  has a nickname field, gain (dB), delay (ms), polarity (Ø), mute (M) and a link
-  button.
-- **Selected-channel bar.** The selected channel's nickname and label, its link
-  group with the members and the sections it ties, and the plot options.
+  `Out 8`) in one row. Each strip has a header with its label and nickname, gain
+  (dB), delay (ms), polarity (Ø), mute (M) and a link button. Clicking the
+  header (its label or nickname) selects that channel.
+- **Selected-channel bar.** The selected channel's nickname and label, its
+  latency (see "Latency" below), its link group with the members and the
+  sections it ties, and the plot options.
 - **Plot**, full width.
 - **Filter cards** for the selected channel, wrapping in one row.
 
@@ -93,9 +95,21 @@ page only draws them. The same limits apply: they model the unit's processing
 only, not speakers, room or amplifier.
 
 Each enabled crossover and each EQ band in use has a handle. Drag it sideways to
-change frequency; for bands with gain, drag up or down to change gain; scroll
-the wheel over a handle to change Q. The values appear in the filter card as
-a draft, to be applied like any other. Unused bands have no handle.
+change frequency. For bands with gain, drag up or down to change gain. For a
+high-pass or low-pass, drag down for a steeper slope and up for a gentler one,
+one 6 dB/oct step per about 18 px, stopping at 6 and 48 dB/oct; frequency and
+slope can change in the same drag, and the card's slope follows. Scroll the
+wheel, or two fingers on a trackpad, over a handle to change Q, by about 10%
+per 100 px of scroll; one hard flick moves it at most about 22%, and the page
+does not scroll under the handle. With a handle focused, the arrow keys move
+it: left and right change frequency by 1/24 octave, up and down change gain
+by 0.1 dB (1 dB with Shift), or step a crossover's slope. The values appear in
+the filter card as a draft, to be applied like any other.
+
+A band that is in use but disabled keeps a greyed, dashed handle with its band
+number, where the band would put the curve if it were on: at its frequency, and
+the curve's level there plus its own gain. It adds nothing to the curve, and
+dragging it edits the disabled band. Unused bands have no handle.
 
 ### Filter cards
 
@@ -110,6 +124,32 @@ frequency and Q. **Add band** enables the first band not in use and shows
 
 At the right, a small list shows whether the limiter, the compressor and the FIR
 are on (an input has only the FIR). They cannot be edited here yet.
+
+### Latency
+
+The selected-channel bar shows an estimate of the latency, such as "Latency
+4.39 ms", computed from the draft settings and the figures measured in
+[PROTOCOL.md](PROTOCOL.md) ("Latency"). For an output it adds up the base
+latency (1.732 ms, analog input to analog output with flat processing), the
+output's delay, its FIR if enabled, and the delay and enabled FIR of an input
+the mixer routes to it. When several inputs are routed and give different
+totals it shows a range ("3.73-4.23 ms"); with none routed it shows the output's
+own figure and says so. An enabled FIR adds 2.662 ms with 256 taps and 3.995 ms
+with 512. For an input it shows only what that input adds. Its tooltip lists the
+parts line by line and the limits: EQ and crossover delay varies with frequency
+and is not included (see Group delay); the unit can be 0.667 ms slower depending
+on its most recent Kaiser-window FIR write, which cannot be read back; and the
+figures were measured on one LA548 from input A to output 1.
+
+### Nicknames
+
+The nickname is shown in the strip's header. A long one covers the fixed label
+(`Out 3`) and, beyond the strip's width, is cut short with an ellipsis; the
+label stays as the header's tooltip, and screen readers announce both ("Out 3,
+Mid L"). Double-click the nickname, or press Enter or F2 with the header
+focused, to edit it in place: Enter or leaving the field saves it, Escape
+cancels. A strip without a nickname shows a dim "Name" there while the pointer
+is over the header or it has focus.
 
 ### Nicknames and links are stored on this computer
 
