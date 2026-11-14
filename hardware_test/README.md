@@ -195,3 +195,53 @@ every channel's live settings. The restore fixture puts the
 | `test_a8_fir_order.py` | `order_index` 0 and 1 both give a working low-pass near the configured corner. Steepness is reported, not graded | Passes; index 0 is measurably less steep than 1 |
 | `test_a9_base_latency.py` | Absolute input A → output 1 latency against the bypass reference, repeatable within one sample; `test_a91` reports any shift from a delay on output 2 or input B; an enabled FIR adds (N - 1) / 2 + 128 samples at 96 kHz in every band, on input A and output 1; its impulse response spans 256 or 512 taps; a Kaiser 21 dB FIR write on any channel adds 64 samples to every path | Skipped unless `LA548_HIL_REFERENCE_CHANNEL` is set. Passes; 1.732 ms base (2.399 ms after a Kaiser 21 dB write), unchanged by delay elsewhere; FIR adds 2.662 / 3.995 ms; 257 / 513 taps measured |
 | `test_b0_fir_coefficients.py` | FIR type 5 convolves the channel with its coefficient block: an impulse at tap d adds 128 + d samples at 96 kHz in every band, on input A and output 1; values are used as given (0.5 is -6 dB, -0.5 inverts) and an all-zero block silences; order index 0 uses 256 values, 1 all 512; a disabled FIR and type 0 ignore the block; the device stores 5 as 6; selecting type 5 does not load the block, and later parameter writes keep it | Skipped unless `LA548_HIL_REFERENCE_CHANNEL` is set (except `test_b00`). Passes; 128.02 / 228.03 / 328.04 samples for taps 0 / 100 / 200; -6.02 dB; zero block 61 dB down |
+
+## Write check without a loopback (LA448 over USB)
+
+`write_check.py` is separate from the loopback tests above. It needs no
+audio interface, no PipeWire and no `LA548_HIL_*` variables, and it is not a
+pytest test: it is a command you run against a unit on USB (or by IP).
+
+It writes each kind of setting the REW tuning loop will use with a changed
+value: output mute, gain, polarity and delay, one mix route, the high-pass
+and low-pass crossover blocks, and one EQ band. After every write it reads
+the whole settings snapshot back and checks that exactly that control
+changed, and to the value sent. It then undoes the write before the next
+one. It plays no audio and measures none.
+
+**Turn the amplifiers off, or unplug the unit's outputs, before running
+it.** For a moment the check unmutes, re-routes and re-filters one output.
+It refuses to connect until you confirm with `--amps-off`.
+
+```sh
+uv run --extra usb python -m hardware_test.write_check usb --amps-off
+```
+
+By default it uses output 8, the route from input D to that output, and EQ
+band 15. Pick others if those are in use:
+
+```sh
+uv run --extra usb python -m hardware_test.write_check usb --amps-off --output 7 --input C --eq-band 14
+```
+
+It prints one table row per control. The exit code says how it ended:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every control passed and the unit's snapshot is byte-identical to before the run |
+| 1 | A control failed. Nothing further was written and the unit was restored |
+| 2 | Nothing was run (`--amps-off` missing, unit locked, no connection), or the unit could **not** be restored |
+
+The first control that fails ends the run: once one write misbehaves, the
+unit's write behaviour is unknown, so nothing more is sent except the
+restore.
+
+Before the first write, the unit's raw snapshot is saved to
+`ignore/write-check-baseline.bin` (change it with `--backup`). If the run
+ends with code 2 after writing, that file is the record of how the unit was.
+The check will not overwrite an existing backup file: move the old one away
+or name another, so a second run can never replace the record of the first.
+
+This check establishes that a write is accepted and reads back. It does not
+establish what the setting does to the audio: filter shapes, delay and
+latency on the LA448 remain unmeasured.

@@ -213,10 +213,39 @@ The LA448 carries the same application command protocol over its USB port
   written with their existing value, readback matched, and the whole
   snapshot was byte-identical before and after.
 
+- Value-changing writes are accepted and read back for the controls below
+  (same unit, 2026-11-14, `python -m hardware_test.write_check usb`; see
+  hardware_test/README.md). Each was written with a changed value; the full
+  settings readback then showed exactly that control changed, to the value
+  sent; the write was undone, and the raw 2464-byte snapshot was
+  byte-identical to the one read before the run after every undo and at the
+  end. Two snapshot reads with no write between them were also identical.
+
+  | Control | Value written | Result |
+  |---|---|---|
+  | Output 8 mute | unmuted | ok |
+  | Output 8 gain | -1.0 dB | ok |
+  | Output 8 polarity | inverted | ok |
+  | Output 8 delay | 1.0 ms | ok |
+  | Mix route, input D to output 8 | off | ok |
+  | Output 8 high-pass frequency | 120 Hz (from 20 Hz) | ok |
+  | Output 8 high-pass type | 1, Linkwitz-Riley (from 0) | ok |
+  | Output 8 high-pass slope | 24 dB/oct (from 6) | ok |
+  | Output 8 high-pass enable | on | ok |
+  | Output 8 low-pass frequency | 8000 Hz (from 20000 Hz) | ok |
+  | Output 8 low-pass enable | on | ok |
+  | Output 8 EQ band 15 | 1000 Hz, -3.0 dB, Q 2.0, type 0, on | ok |
+
 Not established over USB:
 
-- A write that changes a value, and each control other than mute and gain.
+- What any of those settings does to the audio. The check above compares
+  readback only: no signal was played or measured on the LA448, so its
+  filter shapes, delay and latency are not confirmed to match the LA548.
   The measurements in this document were all made on the LA548 over UDP.
+- A value-changing write to any control not in the table: other outputs
+  and bands, input-side mute, gain, polarity, delay and EQ, limiter,
+  compressor, expander, dynamic EQ, input source, frequency shifter and
+  the FIR block.
 - Any request longer than one report (`WRITE_FIR_COEFS`, 2063 bytes). How
   such a request must be split has never been observed, so `HidLink.sendto`
   refuses it and sends nothing: FIR coefficient restore is unavailable over
