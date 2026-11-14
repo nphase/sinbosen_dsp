@@ -680,6 +680,42 @@ def test_write_now_offline_raises_and_leaves_state_unchanged(rig):
     assert service.view(token) == before and device.writes == []
 
 
+def test_write_now_keeps_an_external_conflict_on_another_pending_edit(rig):
+    # Out 3 delay staged 0 -> 5 ms, changed elsewhere to 10 ms, then a mute: Apply must still see the conflict.
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    delay, mute = ControlKey(True, 2, "delay"), ControlKey(True, 0, "mute")
+    service.stage(token, delay, 5.0)
+    device.settings = replace_control(device.settings, delay, 10.0)
+    service.write_now(token, {mute: True})
+    assert [c.key for c in service.view(token).pending] == [delay]
+    result = service.apply(token)
+    assert result.conflicts == (delay,)
+    assert device.settings.outputs[2].base.delay_ms == 10.0
+    assert (delay, 5.0) not in device.writes
+    assert service.view(token).draft.outputs[2].base.delay_ms == 5.0
+
+
+def test_write_now_leaves_a_non_conflicting_pending_edit_to_apply_normally(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    delay, mute, gain = ControlKey(True, 2, "delay"), ControlKey(True, 0, "mute"), ControlKey(True, 5, "gain")
+    service.stage(token, delay, 5.0)
+    device.settings = replace_control(device.settings, gain, -4.0)  # an unrelated change elsewhere
+    service.write_now(token, {mute: True})
+    view = service.view(token)
+    assert view.baseline.outputs[5].base.gain_db == -4.0 and view.baseline.outputs[2].base.delay_ms == 0
+    result = service.apply(token)
+    assert result.applied == (delay,) and not result.conflicts and not result.errors
+    assert device.settings.outputs[2].base.delay_ms == 5.0
+
+
+@pytest.mark.parametrize("block", ["gain", "delay"])
+def test_a_huge_integer_is_refused_as_a_value_error(block):
+    with pytest.raises(ValueError):
+        normalize_control(ControlKey(True, 0, block), 10 ** 400)
+
+
 def test_write_now_never_changes_live(rig):
     service, token, device = rig
     service.connect(token, "127.0.0.1")

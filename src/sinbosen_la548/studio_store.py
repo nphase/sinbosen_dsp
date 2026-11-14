@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -108,14 +109,20 @@ class StudioStore:
         self.path = path
         self.warning: str | None = None
 
-    def load(self, device_key: str) -> DeviceNotes:
+    def load(self, device_key: str, *, channel_counts: tuple[int, int] | None = None) -> DeviceNotes:
+        """The device's notes. With `channel_counts` (inputs, outputs), link members the unit does not have are
+        dropped, and so is a group left with none."""
         raw = self._read_devices().get(device_key)
         if raw is None:
             return DeviceNotes({}, ())
         try:
-            return _parse_notes(raw)
+            notes = _parse_notes(raw)
         except ValueError:
             return DeviceNotes({}, ())
+        if channel_counts is None:
+            return notes
+        groups = (replace(g, members=tuple(m for m in g.members if m < channel_counts[g.output])) for g in notes.links)
+        return replace(notes, links=tuple(g for g in groups if g.members))
 
     def save(self, device_key: str, notes: DeviceNotes) -> None:
         devices = self._read_devices()
@@ -154,9 +161,11 @@ class StudioStore:
 
     def _set_aside(self, reason: str) -> dict[str, Any]:
         bad = self.path.with_name(self.path.name + ".bad")
+        # The time makes each occurrence read differently, so the page shows a recurrence after a dismissal.
+        problem = f"{time.strftime('%H:%M:%S')}: Could not read {self.path} ({reason})"
         try:
             os.replace(self.path, bad)
-            self.warning = f"Could not read {self.path} ({reason}); it was moved to {bad} and notes were reset."
+            self.warning = f"{problem}; it was moved to {bad} and notes were reset."
         except OSError as error:
-            self.warning = f"Could not read {self.path} ({reason}) and could not move it aside ({error})."
+            self.warning = f"{problem} and could not move it aside ({error})."
         return {}

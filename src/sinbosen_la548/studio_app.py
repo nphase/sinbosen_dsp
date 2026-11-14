@@ -60,9 +60,12 @@ def _index(body: dict[str, Any], name: str = "index") -> int:
 
 
 def _number(value: object) -> float:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
-        raise ValueError("value must be a finite number")
-    return float(value)
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+    except OverflowError:
+        pass
+    raise ValueError("value must be a finite number")
 
 
 def _parse_channel(text: object) -> tuple[bool, int]:
@@ -93,7 +96,7 @@ class _Studio:
         channels = view.draft.outputs if self.selected[0] else view.draft.inputs
         if self.selected[1] >= len(channels):
             self.selected = (False, 0)
-        return build_state(view, self.store.load(self.device_key), selected=self.selected,
+        return build_state(view, self._notes(), selected=self.selected,
                            device=None if view.demo else self.device_key, live_errors=self.live_errors,
                            warning=self.store.warning, **self.plot)
 
@@ -103,6 +106,11 @@ class _Studio:
         if channel >= len(draft.outputs if output else draft.inputs):
             raise ValueError("channel out of range")
         return output, channel
+
+    def _notes(self) -> DeviceNotes:
+        """The notes of the device in use, without link members beyond its channel counts."""
+        profile = self.service.view(self.token).draft.profile
+        return self.store.load(self.device_key, channel_counts=(profile.input_count, profile.output_count))
 
     def _save(self, notes: DeviceNotes) -> None:
         self.store.save(self.device_key, notes)
@@ -119,7 +127,7 @@ class _Studio:
         return self.service.write_now(self.token, immediate) if immediate else None
 
     def _group(self, letter: str) -> LinkGroup:
-        group = next((g for g in self.store.load(self.device_key).links if g.letter == letter), None)
+        group = next((g for g in self._notes().links if g.letter == letter), None)
         if group is None:
             raise ValueError(f"no group {letter}")
         return group
@@ -184,7 +192,7 @@ class _Studio:
         output, channel = self._channel(body)
         key = ControlKey(output, channel, _text(body, "block"))
         draft = self.service.view(self.token).draft
-        return self.service.write_now(self.token, links.expand(self.store.load(self.device_key).links, draft,
+        return self.service.write_now(self.token, links.expand(self._notes().links, draft,
                                                                {key: body.get("value")}))
 
     def edit(self, body: dict[str, Any]) -> None:
@@ -223,7 +231,7 @@ class _Studio:
                 if getattr(edited, f.name) != getattr(current, f.name)})
         assert key is not None
         draft = self.service.view(self.token).draft
-        self.service.stage_many(self.token, links.expand(self.store.load(self.device_key).links, draft, {key: block}))
+        self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: block}))
 
     @staticmethod
     def _field_value(field: str, value: object) -> object:
@@ -242,7 +250,7 @@ class _Studio:
             raise ValueError("no free EQ band")
         band = replace(bands[index], enabled=True, type=0, gain_db=0.0, q=1.0, freq_hz=1000, slope=0)
         key = ControlKey(output, channel, "eq", index)
-        self.service.stage_many(self.token, links.expand(self.store.load(self.device_key).links, draft, {key: band}))
+        self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: band}))
 
     def band_remove(self, body: dict[str, Any]) -> None:
         output, channel = self._channel(body)
@@ -253,13 +261,13 @@ class _Studio:
             raise ValueError("EQ band out of range")
         band = replace(bands[index], enabled=False, gain_db=0.0, type=0, slope=0)
         key = ControlKey(output, channel, "eq", index)
-        self.service.stage_many(self.token, links.expand(self.store.load(self.device_key).links, draft, {key: band}))
+        self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: band}))
 
     # Notes
 
     def nickname(self, body: dict[str, Any]) -> None:
         output, channel = self._channel(body)
-        notes = self.store.load(self.device_key)
+        notes = self._notes()
         self._save(replace(notes, nicknames={**notes.nicknames, (output, channel): _text(body, "name")}))
 
     def link(self, body: dict[str, Any]) -> ApplyResult | None:
@@ -267,7 +275,7 @@ class _Studio:
         letter = body.get("letter")
         if letter is not None and not isinstance(letter, str):
             raise ValueError("letter must be a group letter or null")
-        notes = self.store.load(self.device_key)
+        notes = self._notes()
         groups = links.with_member(notes.links, output, channel, letter)
         result = None
         if letter is not None:
@@ -281,14 +289,14 @@ class _Studio:
 
     def unlink(self, body: dict[str, Any]) -> None:
         output, channel = self._channel(body)
-        notes = self.store.load(self.device_key)
+        notes = self._notes()
         self._save(replace(notes, links=links.without_member(notes.links, output, channel)))
 
     def link_sections(self, body: dict[str, Any]) -> None:
         sections = body.get("sections")
         if not isinstance(sections, list) or not all(isinstance(s, str) for s in sections):
             raise ValueError(f"sections must be a list drawn from {', '.join(SECTIONS)}")
-        notes = self.store.load(self.device_key)
+        notes = self._notes()
         self._save(replace(notes, links=links.with_sections(notes.links, _text(body, "letter"),
                                                             frozenset(sections))))
 
@@ -347,7 +355,7 @@ class _LocalOnly:
 
 
 def _status_for(error: Exception) -> int | None:
-    if isinstance(error, (ValueError, PermissionError)):
+    if isinstance(error, (ValueError, PermissionError, OverflowError)):
         return 400
     if isinstance(error, (ConnectionError, TimeoutError, OSError, RuntimeError)):
         return 503

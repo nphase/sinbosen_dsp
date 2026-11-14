@@ -42,7 +42,9 @@ def _channel_id(output: bool, channel: int) -> str:
 
 
 def _channel_label(output: bool, channel: int) -> str:
-    return f"Out {channel + 1}" if output else f"In {ascii_uppercase[channel]}"
+    if output or channel >= len(ascii_uppercase):
+        return f"{'Out' if output else 'In'} {channel + 1}"
+    return f"In {ascii_uppercase[channel]}"
 
 
 def _series(values: NDArray[np.float64]) -> list[float | None]:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from sinbosen_la548.studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 
 ALL = frozenset(SECTIONS)
@@ -134,3 +136,31 @@ def test_nicknames_trimmed_on_load(tmp_path: Path) -> None:
     write(path, {"version": 1, "devices": {"usb:1": {"nicknames": {
         "in:0": " Snare ", "out:2": "", "in:x": "bad", "out:1": 5, "in:-1": "neg"}, "links": []}}})
     assert StudioStore(path).load("usb:1").nicknames == {(False, 0): "Snare"}
+
+
+def test_members_beyond_the_profile_are_dropped_on_load(tmp_path: Path) -> None:
+    path = tmp_path / "studio.json"
+    write(path, {"version": 1, "devices": {"usb:1": {"nicknames": {}, "links": [
+        raw_group("A", False, [0, 99]),   # input 99 does not exist: the group keeps input 0
+        raw_group("B", False, [4, 5]),    # no input survives: the group is dropped
+        raw_group("C", True, [6, 7, 8]),  # output 8 does not exist on an 8-output unit
+    ]}}})
+    store = StudioStore(path)
+    notes = store.load("usb:1", channel_counts=(4, 8))
+    assert notes.links == (group("A", False, (0,), frozenset({"eq"})), group("C", True, (6, 7), frozenset({"eq"})))
+    assert [g.members for g in store.load("usb:1").links] == [(0, 99), (4, 5), (6, 7, 8)]
+
+
+def test_each_set_aside_gives_a_new_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The page forgets a dismissed warning only once it stops standing; a new set-aside must read differently.
+    path = tmp_path / "studio.json"
+    store = StudioStore(path)
+    clock = iter(["10:00:00", "10:00:05"])
+    monkeypatch.setattr("sinbosen_la548.studio_store.time.strftime", lambda fmt: next(clock))
+    path.write_text("garbage")
+    store.load("usb:1")
+    first = store.warning
+    path.write_text("garbage")
+    store.load("usb:1")
+    assert first is not None and store.warning is not None and first != store.warning
+    assert store.warning.startswith("10:00:05")

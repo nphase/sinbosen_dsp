@@ -1,7 +1,8 @@
-"""Browser checks for the studio page, served by uvicorn in offline demo mode.
+"""Browser checks for the studio page, served by uvicorn.
 
-The studio app is started without a service, so it runs the offline demo and never opens a device; nothing here
-posts to `/api/connect`. These fixtures are separate from the Gradio ones in conftest.py.
+The `studio` app is started without a service, so it runs the offline demo and never opens a device. The
+`connected_studio` app's service hands every address to a mock client (`FakeUnit`), so its `/api/connect` never
+reaches hardware either. These fixtures are separate from the Gradio ones in conftest.py.
 """
 
 from __future__ import annotations
@@ -15,10 +16,12 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 from urllib.parse import urlsplit
 
 import pytest
 
+from sinbosen_la548.service import ControlKey, replace_control
 from sinbosen_la548.studio_store import StudioStore
 
 pytestmark = pytest.mark.e2e
@@ -84,15 +87,62 @@ class Studio:
         return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
 
 
+class FakeUnit:
+    """A connected unit made of a mock client: mute, polarity, gain and delay writes change its settings."""
+
+    def __init__(self) -> None:
+        from sinbosen_la548.client import Client, LockState
+        from sinbosen_la548.service import demo_settings
+
+        self.settings = demo_settings()
+        self.client = Mock(spec=Client)
+        self.client.link_up = True
+        self.client.address = "usb:FAKE1"
+        self.client.read_settings.side_effect = lambda: self.settings
+        self.client.read_lock_state.return_value = LockState(False, "")
+        for name, block in [("set_mute", "mute"), ("set_phase", "polarity"), ("set_volume", "gain"),
+                            ("set_delay", "delay")]:
+            getattr(self.client, name).side_effect = self._setter(block)
+
+    def _setter(self, block: str) -> Any:
+        def write(channel: int, value: Any, *, output: bool = False, **kwargs: Any) -> None:
+            self.set(ControlKey(output, channel, block), value)
+        return write
+
+    def set(self, key: Any, value: Any) -> None:
+        self.settings = replace_control(self.settings, key, value)
+
+
+@pytest.fixture
+def unit() -> FakeUnit:
+    return FakeUnit()
+
+
 @pytest.fixture
 def studio(tmp_path: Path) -> Iterator[Studio]:
+    yield from _serve(tmp_path, None)
+
+
+@pytest.fixture
+def connected_studio(tmp_path: Path, unit: FakeUnit) -> Iterator[Studio]:
+    """The page connected to `unit`, a fake: the service's client factory hands it out for any address."""
+    from sinbosen_la548.service import DSPService, demo_settings
+
+    for run in _serve(tmp_path, DSPService(demo_settings(), client_factory=lambda address: unit.client)):
+        run.page.evaluate("fetch('/api/connect', {method: 'POST', headers: {'Content-Type': 'application/json'},"
+                          "body: JSON.stringify({address: 'usb'})})")
+        run.page.locator("#connection").get_by_text("USB · connected").wait_for()
+        yield run
+
+
+def _serve(tmp_path: Path, service: Any) -> Iterator[Studio]:
     pytest.importorskip("playwright.sync_api", reason="install the e2e dependency group")
     import uvicorn
     from playwright.sync_api import sync_playwright
 
     from sinbosen_la548.studio_app import create_studio_app
 
-    app = create_studio_app(store=StudioStore(tmp_path / "studio.json"))
+    app = create_studio_app(service, store=StudioStore(tmp_path / "studio.json"))
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -581,3 +631,72 @@ def test_no_request_leaves_loopback_and_inter_is_served(studio: Studio) -> None:
     assert any(url.endswith("/static/fonts/InterVariable.woff2") for url in studio.requests)
     hosts = {urlsplit(url).hostname for url in studio.requests}
     assert hosts == {"127.0.0.1"}, studio.requests
+
+
+# Errors, refresh and leaving the unit
+
+def test_a_failed_immediate_write_reaches_the_error_bar(connected_studio: Studio, unit: FakeUnit) -> None:
+    unit.client.set_mute.side_effect = OSError("usb write failed")
+    with connected_studio.page.expect_response("**/api/now"):
+        connected_studio.field("Out 2 mute").click()
+    connected_studio.page.locator("#errors").get_by_text("Output 2: mute: usb write failed").wait_for()
+    assert connected_studio.field("Out 2 mute").get_attribute("aria-pressed") == "false"
+
+
+def test_a_dismissed_error_shows_again_when_it_recurs(studio: Studio) -> None:
+    errors = studio.page.locator("#errors li")
+    message = "The studio server is not reachable."
+    for _ in range(2):
+        studio.page.route("**/api/state", lambda route: route.abort())
+        errors.get_by_text(message).wait_for()
+        studio.page.get_by_role("button", name="Dismiss errors").click()
+        errors.get_by_text(message).wait_for(state="detached")
+        studio.page.unroute("**/api/state")
+        with studio.page.expect_response("**/api/state"):
+            pass
+        studio.page.wait_for_timeout(100)
+    studio.errors[:] = [e for e in studio.errors if "net::ERR_FAILED" not in e]
+
+
+def test_refresh_reads_the_unit_again(connected_studio: Studio, unit: FakeUnit) -> None:
+    unit.set(ControlKey(True, 0, "mute"), True)  # changed on the unit, not through the page
+    with connected_studio.page.expect_response("**/api/edit"):
+        connected_studio.field("Out 5 delay in ms").fill("1.5")
+        connected_studio.field("Out 5 delay in ms").press("Enter")
+    connected_studio.page.locator("#connection").click()
+    with connected_studio.page.expect_response("**/api/refresh"):
+        connected_studio.page.get_by_role("button", name="Refresh", exact=True).click()
+    assert connected_studio.field("Out 1 mute").get_attribute("aria-pressed") == "true"
+    assert connected_studio.unapplied().inner_text() == "1 unapplied"
+
+
+def test_disconnecting_with_unapplied_edits_asks_first(connected_studio: Studio) -> None:
+    page = connected_studio.page
+    leaving: list[str] = []
+    page.on("request", lambda request: leaving.append(request.url)
+            if request.url.endswith(("/api/disconnect", "/api/demo")) else None)
+    with page.expect_response("**/api/edit"):
+        connected_studio.field("Out 5 delay in ms").fill("1.5")
+        connected_studio.field("Out 5 delay in ms").press("Enter")
+    page.locator("#connection").click()
+    popover = page.get_by_role("dialog", name="Connection")
+    for button, confirm in (("Disconnect", "Discard and disconnect"), ("Offline demo", "Discard and use demo")):
+        popover.get_by_role("button", name=button, exact=True).click()
+        popover.get_by_text("Discard 1 unapplied edit?", exact=False).wait_for()
+        assert popover.get_by_role("button", name=confirm).is_visible()
+        popover.get_by_role("button", name="Keep edits").click()
+        popover.get_by_text("Discard 1 unapplied edit?", exact=False).wait_for(state="detached")
+    page.wait_for_timeout(200)
+    assert leaving == []
+    assert connected_studio.unapplied().inner_text() == "1 unapplied"
+    popover.get_by_role("button", name="Disconnect", exact=True).click()
+    with page.expect_response("**/api/disconnect"):
+        popover.get_by_role("button", name="Discard and disconnect").click()
+    page.locator("#connection").get_by_text("Offline demo").wait_for()
+    assert connected_studio.unapplied().inner_text() == ""
+
+
+def test_disconnecting_without_unapplied_edits_does_not_ask(connected_studio: Studio) -> None:
+    connected_studio.page.locator("#connection").click()
+    with connected_studio.page.expect_response("**/api/disconnect"):
+        connected_studio.page.get_by_role("button", name="Disconnect", exact=True).click()

@@ -49,8 +49,9 @@ let sequence = 0;
 let shown = 0;
 let busy = 0;
 let plot = null;
-// Values waiting to be posted, per handle key, so a gesture on another handle never drops the last one's.
+// Values waiting to be posted, per channel and handle, so a gesture on another handle never drops the last one's.
 const handleEdits = { queued: new Map(), timer: null, flushing: false, last: 0, sent: false };
+const queueKey = () => `${ui.handle.target.id} ${ui.handle.key}`;
 
 // DOM building and patching
 
@@ -269,7 +270,7 @@ function targetOf(filter) {
 }
 
 function queueHandleEdit(values) {
-  handleEdits.queued.set(ui.handle.key, { target: ui.handle.target, values });
+  handleEdits.queued.set(queueKey(), { target: ui.handle.target, values });
   if (handleEdits.flushing || handleEdits.timer) return;
   const wait = Math.max(0, handleEdits.last + EDIT_INTERVAL_MS - performance.now());
   handleEdits.timer = setTimeout(flushHandleEdits, wait);
@@ -300,9 +301,12 @@ async function flushHandleEdits() {
   }
 }
 
+// True when `ui.handle` is a gesture on this handle of the selected channel.
+const editing = (key) => ui.handle?.key === key && ui.handle.target.id === state.selected.id;
+
 function startHandleEdit(key, before, dragging) {
   const filter = state.selected.filters.find((f) => f.key === key);
-  if (ui.handle?.key !== key) {
+  if (!editing(key)) {
     ui.handle = { key, target: targetOf(filter), before, values: {}, dragging };
     handleEdits.sent = false;
   } else {
@@ -331,7 +335,7 @@ const plotHooks = {
     ui.handle.values = { ...ui.handle.values, ...ui.handle.before };
     ui.handle.dragging = false;
     if (handleEdits.sent) queueHandleEdit(ui.handle.before);
-    else handleEdits.queued.delete(ui.handle.key);
+    else handleEdits.queued.delete(queueKey());
     if (!handleEdits.flushing && !handleEdits.timer) flushHandleEdits();
     render();
   },
@@ -343,7 +347,7 @@ const plotHooks = {
       ?.focus();
   },
   nudge(key, values) {
-    if (ui.handle?.key !== key) startHandleEdit(key, null, false);
+    if (!editing(key)) startHandleEdit(key, null, false);
     ui.handle.values = { ...ui.handle.values, ...values };
     queueHandleEdit(ui.handle.values);
     render();
@@ -431,8 +435,10 @@ function topBar() {
 
 function standingErrors() {
   const status = state?.status ?? {};
-  return [ui.serverDown, status.warning, status.live_errors && `Live: ${status.live_errors}`]
-    .filter((message) => message && !ui.dismissed.has(message));
+  const standing = [ui.serverDown, status.warning, status.live_errors && `Live: ${status.live_errors}`].filter(Boolean);
+  // A dismissal lasts only while its message stands, so the same failure coming back later shows again.
+  for (const message of ui.dismissed) if (!standing.includes(message)) ui.dismissed.delete(message);
+  return standing.filter((message) => !ui.dismissed.has(message));
 }
 
 function errorBar() {
@@ -543,7 +549,7 @@ function cardControl(filter, field, target) {
   }
   const display = fieldDisplay[field.key] ?? String;
   // A handle gesture shows its values here before the server has answered.
-  const edited = ui.handle?.key === filter.key ? ui.handle.values[field.key] : undefined;
+  const edited = editing(filter.key) ? ui.handle.values[field.key] : undefined;
   return textInput({
     id: `${state.selected.id}:${filter.key}:${field.key}`, label: name, number: true,
     display: display(edited ?? field.value),
@@ -629,8 +635,27 @@ function syncMenu(anchor) {
       () => send("/api/link/sync", { letter: link.letter, from: m.id }))));
 }
 
+// Disconnecting or switching to the demo discards unapplied edits, so with any pending the popover asks first.
+function leave(path, confirmed = false) {
+  if (state.status.pending_count && !confirmed) ui.menu.leaving = path;
+  else send(path);
+}
+
+function leaveConfirmation(path, pending) {
+  return [
+    h("div", { class: "confirm", role: "alert" },
+      `Discard ${pending} unapplied ${pending === 1 ? "edit" : "edits"}? They have not been sent to the unit.`),
+    h("div", { class: "row" },
+      h("button", { type: "button", class: "button danger", "data-action": act(() => leave(path, true)) },
+        path === "/api/demo" ? "Discard and use demo" : "Discard and disconnect"),
+      h("button", { type: "button", class: "button", "data-action": act(() => { ui.menu.leaving = null; }) },
+        "Keep edits")),
+  ];
+}
+
 function connectionPopover(anchor) {
   const status = state.status;
+  const leaving = ui.menu.leaving;
   return h("div", { class: "menu popover", role: "dialog", "aria-label": "Connection", style: below(anchor, 260) },
     h("label", { for: "conn-address" }, "Device address (usb, usb:<serial> or an IP address)"),
     h("input", { id: "conn-address", class: "field", type: "text", value: ui.address, "data-local": "address",
@@ -638,10 +663,14 @@ function connectionPopover(anchor) {
     h("div", { class: "row" },
       h("button", { type: "button", class: "button primary", disabled: ui.connecting, "data-action": act(connect) },
         ui.connecting ? "Connecting…" : "Connect"),
+      h("button", { type: "button", class: "button", disabled: !status.connected, title: "Read the unit again",
+        "data-action": act(() => send("/api/refresh")) }, "Refresh")),
+    h("div", { class: "row" },
       h("button", { type: "button", class: "button", disabled: !status.connected,
-        "data-action": act(() => send("/api/disconnect")) }, "Disconnect"),
+        "data-action": act(() => leave("/api/disconnect")) }, "Disconnect"),
       h("button", { type: "button", class: "button", disabled: status.demo,
-        "data-action": act(() => send("/api/demo")) }, "Offline demo")));
+        "data-action": act(() => leave("/api/demo")) }, "Offline demo")),
+    leaving && status.pending_count ? leaveConfirmation(leaving, status.pending_count) : null);
 }
 
 function overlay() {
@@ -682,7 +711,7 @@ function render() {
   patch("selected-bar", selectedBar());
   patch("cards", cards());
   plot ??= createPlot(document.getElementById("plot"), plotHooks);
-  plot.draw(state.plot, state.selected.filters, ui.handle);
+  plot.draw(state.plot, state.selected.filters, ui.handle?.target.id === state.selected.id ? ui.handle : null);
   patch("overlay", overlay());
   if (ui.focusMenu) {
     ui.focusMenu = false;

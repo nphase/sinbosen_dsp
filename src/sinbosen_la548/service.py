@@ -264,7 +264,11 @@ def normalize_control(key: ControlKey, value: object) -> object:
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise ValueError(f"{key.block} requires a number")
         codec = codecs.volume_u16 if key.block == "gain" else codecs.delay_u16
-        return codec.decode(codec.encode(float(value)))
+        try:
+            number = float(value)
+        except OverflowError:
+            raise ValueError(f"{key.block} is out of range") from None
+        return codec.decode(codec.encode(number))
     if key.block == "eq" and isinstance(value, EQBandSettings):
         if value.slope not in (0, 1):
             raise ValueError("EQ slope must be 0 or 1")
@@ -739,8 +743,13 @@ class DSPService:
             try:
                 readback = client.read_settings()
                 observed = controls(readback)
-                state.baseline = readback
-                draft = readback
+                # A pending edit whose control was changed elsewhere keeps its old baseline value, so the
+                # later Apply still reports the conflict instead of taking the new readback as agreed.
+                baseline, previous = readback, controls(state.baseline)
+                for key in self._conflicts(others, readback):
+                    baseline = replace_control(baseline, key, previous[key])
+                state.baseline = baseline
+                draft = baseline
                 for c in others:
                     draft = replace_control(draft, c.key, c.after)
                 state.draft = draft

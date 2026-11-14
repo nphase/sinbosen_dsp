@@ -139,6 +139,39 @@ def test_invalid_edit_is_400_with_message_and_stages_nothing(client: TestClient,
     assert client.get("/api/state").json()["status"]["pending_count"] == 0
 
 
+@pytest.mark.parametrize("body", [
+    {"id": "out:0", "kind": "delay", "field": "delay_ms", "value": 10 ** 400},
+    {"id": "out:0", "kind": "hp", "field": "freq_hz", "value": 10 ** 400},
+])
+def test_a_huge_integer_edit_is_400_and_stages_nothing(client: TestClient, body: dict[str, Any]) -> None:
+    response = client.post("/api/edit", json=body)
+    assert response.status_code == 400
+    assert response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def test_a_huge_integer_immediate_write_is_400_and_writes_nothing(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        response = client.post("/api/now", json={"id": "out:1", "block": "gain", "value": 10 ** 400})
+        assert response.status_code == 400
+        assert "out of range" in response.json()["error"]
+    device.client.set_volume.assert_not_called()
+
+
+def test_a_stored_link_beyond_the_profile_does_not_break_the_state(store: StudioStore) -> None:
+    store.path.write_text(json.dumps({"version": 1, "devices": {"demo": {"nicknames": {}, "links": [
+        {"letter": "A", "output": False, "members": [0, 99], "sections": ["eq"]},
+        {"letter": "B", "output": True, "members": [42], "sections": ["eq"]}]}}}))
+    with make_client(DSPService(demo_settings()), store) as client:
+        response = client.get("/api/state")
+        assert response.status_code == 200, response.text
+        post(client, "/api/select", id="in:0")
+        state = post(client, "/api/link/sections", letter="A", sections=["eq", "gain"])
+        assert [m["id"] for m in state["selected"]["link"]["members"]] == ["in:0"]
+        assert client.post("/api/link/sections", json={"letter": "B", "sections": []}).status_code == 400
+
+
 def test_now_mute_changes_the_channel_without_pending(client: TestClient) -> None:
     state = post(client, "/api/now", id="out:1", block="mute", value=True)
     assert channel(state, "out:1")["muted"] is True

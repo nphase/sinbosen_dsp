@@ -387,3 +387,5 @@ select.field option { background: var(--panel); color: var(--text); }
 .popover label { color: var(--muted); font-size: 11px; }
 .popover .row { display: flex; gap: 4px; }
 .popover .button { height: 26px; padding: 0 10px; }
+.popover .confirm { max-width: 240px; color: var(--pending); font-size: 12px; }
+.button.danger { border-color: var(--danger); color: var(--danger); }

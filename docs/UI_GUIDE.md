@@ -33,9 +33,9 @@ prints a warning.
 
 - **Top bar.** The connection chip shows `USB` or the unit's address and its
   state ("Offline demo", "Not connected"); clicking it opens the connect box
-  (an IP address, `usb` or `usb:<serial>`) and an **Offline demo** button. Then
-  the Tune tab, the **Live** toggle, the count of unapplied changes, **Revert**
-  and **Apply**.
+  (an IP address, `usb` or `usb:<serial>`) with **Connect**, **Refresh**,
+  **Disconnect** and **Offline demo**. Then the Tune tab, the **Live** toggle,
+  the count of unapplied changes, **Revert** and **Apply**.
 - **Channel strips.** All 4 inputs (`In A` to `In D`) and 8 outputs (`Out 1` to
   `Out 8`) in one row. Clicking a strip's label selects that channel. Each strip
   has a nickname field, gain (dB), delay (ms), polarity (Ø), mute (M) and a link
@@ -61,6 +61,11 @@ is checked, the unit is read back and a conflicting outside change is reported
 rather than overwritten, only changed blocks are written, and the readback is
 verified. With **Live** on, drafts are written as you make them instead, and
 Live needs a connected unit.
+
+**Refresh** in the connection box reads the unit again and keeps your drafts. If
+a control you have a draft for was changed on the unit in the meantime, it
+reports the conflict and changes nothing. **Disconnect** and **Offline demo**
+discard the drafts; with unapplied edits the box asks before doing either.
 
 ### Links
 
@@ -103,8 +108,8 @@ a band disables it and resets it to a 0 dB parametric band, keeping its
 frequency and Q. **Add band** enables the first band not in use and shows
 `n of N used`.
 
-At the right, a small list shows the on/off state of the limiter, compressor and
-FIR, among other blocks. They cannot be edited here yet.
+At the right, a small list shows whether the limiter, the compressor and the FIR
+are on (an input has only the FIR). They cannot be edited here yet.
 
 ### Nicknames and links are stored on this computer
 

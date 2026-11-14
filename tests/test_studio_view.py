@@ -313,3 +313,9 @@ def test_field_only_change_leaves_enabled_not_pending(service: DSPService, token
     assert [f["key"] for f in band["fields"] if f["pending"]] == ["gain_db"]
     assert handle(result, "eq:0")["pending"] is True
     assert card(result, "hp")["enabled_pending"] is False
+
+
+def test_labels_tolerate_channels_beyond_the_alphabet(service: DSPService, token: str) -> None:
+    group = LinkGroup("A", False, (0, 99), frozenset({"eq"}))
+    result = state(service, token, DeviceNotes({}, (group,)), selected=IN_A)
+    assert [m["label"] for m in result["selected"]["link"]["members"]] == ["In A", "In 100"]
