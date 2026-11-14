@@ -303,6 +303,7 @@ def test_verify_accepts_readback_matching_the_write(monkeypatch, capsys, argv):
 def test_search_forwards_source_ip(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(cli.discovery, "search", lambda **kwargs: calls.append(kwargs) or [])
+    monkeypatch.setattr(cli.usb, "list_devices", lambda: [])
 
     rc = cli._cmd_search(argparse.Namespace(timeout=1.25, source_ip="192.0.2.149"))
 
@@ -322,3 +323,53 @@ def test_unsupported_eq_all_cli_commands_do_not_construct_a_client(monkeypatch, 
     monkeypatch.setattr(cli, "Client", lambda ip: pytest.fail("must not construct a client"))
     assert command(args) == 2
     assert "no packet was sent" in capsys.readouterr().err
+
+
+def test_search_lists_usb_units(monkeypatch, capsys):
+    monkeypatch.setattr(cli.discovery, "search", lambda **kwargs: [])
+    monkeypatch.setattr(cli.usb, "list_devices", lambda: ["6C61B7010730"])
+
+    rc = cli._cmd_search(argparse.Namespace(timeout=0.1, source_ip=None))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "usb:6C61B7010730" in out
+    assert "No devices found" not in out
+
+
+def test_search_without_hidapi_still_runs(monkeypatch, capsys):
+    def missing() -> list[str]:
+        raise RuntimeError("USB support needs the hidapi package: uv sync --extra usb")
+
+    monkeypatch.setattr(cli.discovery, "search", lambda **kwargs: [])
+    monkeypatch.setattr(cli.usb, "list_devices", missing)
+
+    assert cli._cmd_search(argparse.Namespace(timeout=0.1, source_ip=None)) == 1
+    assert "No devices found" in capsys.readouterr().out
+
+
+def test_device_address_help_mentions_usb(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["status", "--help"])
+    assert "usb:<serial>" in capsys.readouterr().out
+
+
+def test_write_fir_coefs_reports_a_locally_refused_write_as_not_sent(monkeypatch, tmp_path: Path, capsys):
+    # Over USB the transport refuses a multi-report frame before sending it,
+    # so the CLI must not call the outcome unknown.
+    source = tmp_path / "fir.bin"
+    source.write_bytes(struct.pack("<512f", 1.0, *([0.0] * 511)))
+    fake = _FakeClient(bytes(2048))
+
+    def refuse(channel: int, coefficients: bytes, *, output: bool = False) -> None:
+        raise NotImplementedError("requests longer than one USB report are unverified; no packet was sent")
+
+    fake.write_fir_coefs = refuse  # type: ignore[method-assign]
+    monkeypatch.setattr(cli, "Client", lambda ip: fake)
+
+    rc = cli._cmd_write_fir_coefs(argparse.Namespace(ip="usb", channel=0, input=str(source), output=False))
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "no packet was sent" in err
+    assert "outcome unknown" not in err

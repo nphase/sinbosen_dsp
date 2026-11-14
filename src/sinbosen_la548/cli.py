@@ -10,7 +10,7 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import discovery
+from . import discovery, usb
 from .blobdiff import diff_blobs
 from .client import Client
 from .service import ControlKey, FIRRestoreError, controls, restore_fir_coefficients, validated_fir_coefficients
@@ -66,9 +66,19 @@ def _finish_write(client: Client, args: argparse.Namespace, key: ControlKey) -> 
     return 0
 
 
+def _usb_units() -> list[str]:
+    try:
+        return usb.list_devices()
+    except RuntimeError:  # hidapi isn't installed (the optional `usb` extra)
+        return []
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
+    usb_units = _usb_units()
+    for serial in usb_units:
+        print(f"usb:{serial}\tUSB")
     devices = discovery.search(timeout=args.timeout, source_ip=args.source_ip)
-    if not devices:
+    if not devices and not usb_units:
         print("No devices found. Discovery is unconfirmed against real hardware - see docs/PROTOCOL.md.")
         return 1
     for dev in devices:
@@ -323,6 +333,9 @@ def _cmd_write_fir_coefs(args: argparse.Namespace) -> int:
         except FIRRestoreError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        except NotImplementedError as exc:  # refused locally, e.g. a multi-report write over USB
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         except Exception as exc:
             stage = "outcome unknown; read the block back before further writes" if written else "nothing written"
             print(f"error: FIR restore failed ({exc}); {stage}", file=sys.stderr)
@@ -359,6 +372,9 @@ def _cmd_diff_group(args: argparse.Namespace) -> int:
     return 1
 
 
+_ADDRESS_HELP = "device IP address, or `usb` / `usb:<serial>` for a unit on USB (LA448)"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sinbosen-la548",
@@ -367,46 +383,47 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_search = sub.add_parser(
-        "search", help="Try CH9120 discovery (known to return no reply on the verified bridge/firmware)"
+        "search",
+        help="List units on USB and try CH9120 discovery (known to return no reply on the verified bridge/firmware)",
     )
     p_search.add_argument("--timeout", type=float, default=2.0)
     p_search.add_argument("--source-ip", help="bind discovery to this local IPv4 address")
     p_search.set_defaults(func=_cmd_search)
 
     p_status = sub.add_parser("status", help="Show program slot 1 name and lock state")
-    p_status.add_argument("ip")
+    p_status.add_argument("ip", help=_ADDRESS_HELP)
     p_status.set_defaults(func=_cmd_status)
 
     p_dump = sub.add_parser("dump-group", help="Read the active channel group and save it to a file")
-    p_dump.add_argument("ip")
+    p_dump.add_argument("ip", help=_ADDRESS_HELP)
     p_dump.add_argument("out")
     p_dump.add_argument("--no-validate", action="store_true", dest="no_validate",
                         help="save the reply even if it does not decode as a DA0408X snapshot")
     p_dump.set_defaults(func=_cmd_dump_group)
 
     p_mute = sub.add_parser("set-mute", help="Mute or unmute one channel")
-    p_mute.add_argument("ip")
+    p_mute.add_argument("ip", help=_ADDRESS_HELP)
     p_mute.add_argument("channel", type=int)
     p_mute.add_argument("state", choices=["mute", "unmute"])
     p_mute.add_argument("--output", action="store_true", help="target an output channel (default: input)")
     p_mute.set_defaults(func=_cmd_set_mute)
 
     p_volume = sub.add_parser("set-volume", help="Set one channel's gain in dB")
-    p_volume.add_argument("ip")
+    p_volume.add_argument("ip", help=_ADDRESS_HELP)
     p_volume.add_argument("channel", type=int)
     p_volume.add_argument("db", type=float)
     p_volume.add_argument("--output", action="store_true", help="target an output channel (default: input)")
     p_volume.set_defaults(func=_cmd_set_volume)
 
     p_phase = sub.add_parser("set-phase", help="Set one channel's polarity")
-    p_phase.add_argument("ip")
+    p_phase.add_argument("ip", help=_ADDRESS_HELP)
     p_phase.add_argument("channel", type=int)
     p_phase.add_argument("state", choices=["normal", "invert"])
     p_phase.add_argument("--output", action="store_true", help="target an output channel (default: input)")
     p_phase.set_defaults(func=_cmd_set_phase)
 
     p_delay = sub.add_parser("set-delay", help="Set one channel's delay in milliseconds (0-1200)")
-    p_delay.add_argument("ip")
+    p_delay.add_argument("ip", help=_ADDRESS_HELP)
     p_delay.add_argument("channel", type=int)
     p_delay.add_argument("ms", type=float)
     p_delay.add_argument("--output", action="store_true", help="target an output channel (default: input)")
@@ -416,7 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
         "set-xover",
         help="Set a crossover block (output channels only - all fields required, sent as one struct write)",
     )
-    p_xover.add_argument("ip")
+    p_xover.add_argument("ip", help=_ADDRESS_HELP)
     p_xover.add_argument("channel", type=int, help="output channel, 0-based - crossover is output-only")
     p_xover.add_argument("band", choices=["hp", "lp"])
     p_xover.add_argument("--freq", type=int, required=True, metavar="HZ", help="10-20000 Hz")
@@ -432,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_eq = sub.add_parser(
         "set-eq-band", help="Set an EQ band (all fields required except --gain for AllPass - one struct write)"
     )
-    p_eq.add_argument("ip")
+    p_eq.add_argument("ip", help=_ADDRESS_HELP)
     p_eq.add_argument("channel", type=int)
     p_eq.add_argument("band_index", type=int, help="0-based; module_id = 4 + band_index")
     p_eq.add_argument("--freq", type=int, required=True, metavar="HZ", help="10-20000 Hz")
@@ -458,14 +475,14 @@ def build_parser() -> argparse.ArgumentParser:
         "eq-bypass",
         help="Toggle every EQ band on one channel at once (confirmed non-functional on this hardware)",
     )
-    p_eq_bypass.add_argument("ip")
+    p_eq_bypass.add_argument("ip", help=_ADDRESS_HELP)
     p_eq_bypass.add_argument("channel", type=int)
     p_eq_bypass.add_argument("state", choices=["on", "off"])
     p_eq_bypass.add_argument("--output", action="store_true", help="target an output channel (default: input)")
     p_eq_bypass.set_defaults(func=_cmd_eq_bypass)
 
     p_eq_reset = sub.add_parser("eq-reset", help="Reset every EQ band on one channel at once")
-    p_eq_reset.add_argument("ip")
+    p_eq_reset.add_argument("ip", help=_ADDRESS_HELP)
     p_eq_reset.add_argument("channel", type=int)
     p_eq_reset.add_argument("--output", action="store_true", help="target an output channel (default: input)")
     p_eq_reset.set_defaults(func=_cmd_eq_reset)
@@ -474,7 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
         "set-dynamic-eq-band",
         help="Set an input-only Dynamic EQ band (all fields required - one struct write)",
     )
-    p_dyneq.add_argument("ip")
+    p_dyneq.add_argument("ip", help=_ADDRESS_HELP)
     p_dyneq.add_argument("channel", type=int)
     p_dyneq.add_argument("band_index", type=int, help="0-based; module_id = 35 + band_index")
     p_dyneq.add_argument("--freq", type=int, required=True, metavar="HZ", help="10-20000 Hz")
@@ -505,7 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_comp = sub.add_parser(
         "set-compressor", help="Set the Compressor block (all fields required - one struct write)"
     )
-    p_comp.add_argument("ip")
+    p_comp.add_argument("ip", help=_ADDRESS_HELP)
     p_comp.add_argument("channel", type=int)
     p_comp.add_argument(
         "--start-time", type=float, required=True, metavar="MS", dest="start_time", help="minimum 0.3 ms"
@@ -525,7 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
         "set-limiter",
         help="Set the Limiter block, output-only (all fields required - one struct write)",
     )
-    p_lim.add_argument("ip")
+    p_lim.add_argument("ip", help=_ADDRESS_HELP)
     p_lim.add_argument("channel", type=int)
     p_lim.add_argument(
         "--start-time", type=float, required=True, metavar="MS", dest="start_time", help="minimum 0.3 ms"
@@ -547,7 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
         "set-expander",
         help="Set the Expander block, input-only (all fields required - one struct write)",
     )
-    p_exp.add_argument("ip")
+    p_exp.add_argument("ip", help=_ADDRESS_HELP)
     p_exp.add_argument("channel", type=int)
     p_exp.add_argument(
         "--start-time", type=float, required=True, metavar="MS", dest="start_time", help="minimum 0.3 ms"
@@ -566,7 +583,7 @@ def build_parser() -> argparse.ArgumentParser:
         "set-mix-route",
         help="Toggle one input/output crosspoint of the mix matrix ('on' = connected, confirmed live)",
     )
-    p_mix.add_argument("ip")
+    p_mix.add_argument("ip", help=_ADDRESS_HELP)
     p_mix.add_argument("in_index", type=int, help="0-based")
     p_mix.add_argument("out_index", type=int, help="0-based")
     p_mix.add_argument("state", choices=["on", "off"])
@@ -575,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_insrc = sub.add_parser(
         "set-input-source", help="Set the Input Source block, input-only (all fields required, whole struct sent)"
     )
-    p_insrc.add_argument("ip")
+    p_insrc.add_argument("ip", help=_ADDRESS_HELP)
     p_insrc.add_argument("channel", type=int)
     p_insrc.add_argument("state", choices=["on", "off"])
     p_insrc.add_argument(
@@ -587,7 +604,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_insrc.set_defaults(func=_cmd_set_input_source)
 
     p_fir = sub.add_parser("set-fir", help="Set the FIR block (all fields required, whole struct sent)")
-    p_fir.add_argument("ip")
+    p_fir.add_argument("ip", help=_ADDRESS_HELP)
     p_fir.add_argument("channel", type=int)
     p_fir.add_argument("state", choices=["on", "off"])
     p_fir.add_argument(
@@ -626,7 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
         "set-freq-shifter",
         help="Set the Frequency Shifter block, input-only (all fields required, whole struct sent)",
     )
-    p_fs.add_argument("ip")
+    p_fs.add_argument("ip", help=_ADDRESS_HELP)
     p_fs.add_argument("channel", type=int)
     p_fs.add_argument("level", type=int, help="index 0-5: approximately 1/2.5/3.5/5/7/9 Hz")
     p_fs.add_argument("direction", type=int, help="0=down, 1=up (both confirmed on hardware)")
@@ -634,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fs.set_defaults(func=_cmd_set_freq_shifter)
 
     p_save = sub.add_parser("save-program", help="Save the device's current live state to a program slot")
-    p_save.add_argument("ip")
+    p_save.add_argument("ip", help=_ADDRESS_HELP)
     p_save.add_argument("slot", type=int, help="0-based")
     p_save.set_defaults(func=_cmd_save_program)
 
@@ -642,14 +659,14 @@ def build_parser() -> argparse.ArgumentParser:
         "load-program",
         help="Load a program slot, OVERWRITING ALL of the device's current live settings",
     )
-    p_load.add_argument("ip")
+    p_load.add_argument("ip", help=_ADDRESS_HELP)
     p_load.add_argument("slot", type=int, help="0-based")
     p_load.set_defaults(func=_cmd_load_program)
 
     p_readfir = sub.add_parser(
         "read-fir-coefs", help="Back up one DA0408X channel's exact 2048-byte FIR coefficient block"
     )
-    p_readfir.add_argument("ip")
+    p_readfir.add_argument("ip", help=_ADDRESS_HELP)
     p_readfir.add_argument("channel", type=int)
     p_readfir.add_argument("out")
     p_readfir.add_argument("--output", action="store_true", help="target an output channel (default: input)")
@@ -659,14 +676,14 @@ def build_parser() -> argparse.ArgumentParser:
         "write-fir-coefs",
         help="Write and verify one channel's exact 2048-byte DA0408X FIR coefficient block (FIR type 5 applies it)",
     )
-    p_writefir.add_argument("ip")
+    p_writefir.add_argument("ip", help=_ADDRESS_HELP)
     p_writefir.add_argument("channel", type=int)
     p_writefir.add_argument("input")
     p_writefir.add_argument("--output", action="store_true", help="target an output channel (default: input)")
     p_writefir.set_defaults(func=_cmd_write_fir_coefs)
 
     p_chcopy = sub.add_parser("channel-copy", help="Copy one DA0408X channel's full settings onto another")
-    p_chcopy.add_argument("ip")
+    p_chcopy.add_argument("ip", help=_ADDRESS_HELP)
     p_chcopy.add_argument("source", type=int, help="0-based")
     p_chcopy.add_argument("target", type=int, help="0-based")
     p_chcopy.add_argument(

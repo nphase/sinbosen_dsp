@@ -1,11 +1,12 @@
 import queue
+import socket
 import threading
 import time
 from typing import Any
 
 import pytest
 
-from sinbosen_la548 import protocol
+from sinbosen_la548 import protocol, usb
 from sinbosen_la548.protocol import Frame, Opcode
 from sinbosen_la548.transport import _RECV_BUFFER_SIZE, LINK_TIMEOUT, QUARANTINE_S, Transport, _may_collide
 
@@ -604,5 +605,70 @@ def test_recv_loop_marks_link_down_on_receive_error():
     try:
         t._recv_loop()
         assert t.link_up is False
+    finally:
+        t.stop()
+
+
+class _ReplyingHidDevice:
+    """Fake hidapi device: answers each written report with one canned
+    reply report, and otherwise has nothing to read."""
+
+    def __init__(self, reply: bytes) -> None:
+        self._reply = reply
+        self._pending: list[bytes] = []
+        self.written: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        self.written.append(bytes(data))
+        self._pending.append(self._reply)
+        return len(data)
+
+    def read(self, max_length: int, timeout_ms: int = 0) -> list[int]:
+        if not self._pending:
+            time.sleep(0.01)
+            return []
+        return list(self._pending.pop(0))
+
+    def close(self) -> None:
+        pass
+
+
+def test_usb_address_uses_a_hid_link_instead_of_a_socket(monkeypatch):
+    # The LA448 pads every reply to a 64-byte report and uses version 0x0F.
+    reply = protocol.encode_frame(Opcode.READ_LOCK_STATE, b"\x000000", version=0x0F, channel_id=1)
+    device = _ReplyingHidDevice(reply.ljust(64, b"\x00"))
+    opened: list[str] = []
+
+    def open_link(address: str) -> usb.HidLink:
+        opened.append(address)
+        return usb.HidLink(device, "usb:6C61B7010730")
+
+    monkeypatch.setattr(usb, "open_link", open_link)
+    monkeypatch.setattr(socket, "gethostbyname", lambda host: pytest.fail("must not resolve a USB address"))
+    t = Transport(" USB ")
+    t.start()
+    try:
+        assert t.request(Opcode.READ_LOCK_STATE, timeout=1.0).payload == b"\x000000"
+        assert t.link_up
+    finally:
+        t.stop()
+    assert opened == [" USB "]
+    request = protocol.encode_frame(Opcode.READ_LOCK_STATE)
+    assert device.written == [b"\x00" + request.ljust(64, b"\x00")]
+
+
+def test_hostname_starting_with_usb_still_resolves_as_a_network_host(monkeypatch):
+    resolved: list[str] = []
+
+    def resolve(host: str) -> str:
+        resolved.append(host)
+        return "127.0.0.1"
+
+    monkeypatch.setattr(socket, "gethostbyname", resolve)
+    monkeypatch.setattr(usb, "open_link", lambda address: pytest.fail("must not open a USB link"))
+    t = Transport("usbhost.local")
+    try:
+        assert resolved == ["usbhost.local"]
+        assert t._addr == ("127.0.0.1", 8087)
     finally:
         t.stop()

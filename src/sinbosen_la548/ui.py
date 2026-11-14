@@ -90,7 +90,7 @@ def create_app(service: DSPService | None = None) -> DSPApp:
         gr.Markdown("# LA548 · DSP Studio", elem_id="app-heading")
         gr.Markdown("Crossovers, phase alignment, and precise DSP control. Connect to load your device settings.")
         with gr.Row():
-            ip = gr.Textbox(label="DSP IP address", placeholder="192.168.1.100", scale=2)
+            ip = gr.Textbox(label="DSP address", placeholder="192.168.1.100 or usb", scale=2)
             connect = gr.Button("Connect", variant="primary")
             disconnect = gr.Button("Disconnect")
             demo = gr.Button("Offline demo")

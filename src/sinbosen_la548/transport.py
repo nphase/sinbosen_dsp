@@ -1,8 +1,9 @@
-"""UDP transport for the LA548 application-level command protocol.
+"""Transport for the LA548 application-level command protocol.
 
-Owns one UDP socket to a single unit, runs a background HandShake keepalive
-(180ms send interval / ~6s link timeout), and lets callers do simple
-request/reply exchanges on top.
+Owns one link to a single unit - a UDP socket, or a USB HID link (usb.py)
+when the address is `usb` / `usb:<serial>` - runs a background HandShake
+keepalive (180ms send interval / ~6s link timeout), and lets callers do
+simple request/reply exchanges on top.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 
-from . import protocol
+from . import protocol, usb
 from .protocol import Frame, Opcode
 
 DEFAULT_PORT = 8087
@@ -84,18 +85,25 @@ def _require_sendable(opcode: Opcode | int) -> Opcode:
 
 
 class Transport:
-    """UDP connection to one LA548 unit."""
+    """Connection to one unit, over UDP or USB HID."""
 
     def __init__(self, ip: str, port: int = DEFAULT_PORT, *, device_number: int = 0, version: int = 10):
-        # Resolve once, IPv4 to match AF_INET: the same address is both the
-        # sendto() target and the source filter in _recv_loop, so a hostname
-        # (or "localhost") must not be compared as text against reply IPs.
-        self._addr = (socket.gethostbyname(ip), port)
+        self._sock: socket.socket | usb.HidLink
+        if usb.parse_address(ip)[0]:
+            # `port` has no meaning over USB. The link reports its own
+            # address from recvfrom(), which is what _recv_loop filters on.
+            self._sock = usb.open_link(ip)
+            self._addr = (self._sock.address, 0)
+        else:
+            # Resolve once, IPv4 to match AF_INET: the same address is both the
+            # sendto() target and the source filter in _recv_loop, so a hostname
+            # (or "localhost") must not be compared as text against reply IPs.
+            self._addr = (socket.gethostbyname(ip), port)
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.device_number = device_number
         self.version = version
         self.quarantine_s = QUARANTINE_S
         self.rejected_frames: Counter[str] = Counter()
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.settimeout(0.2)
         self._recv_thread: threading.Thread | None = None
         self._handshake_thread: threading.Thread | None = None

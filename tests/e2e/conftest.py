@@ -274,7 +274,7 @@ class Scenario:
         self.errors = errors
 
     def connect(self) -> None:
-        self.page.get_by_label("DSP IP address", exact=True).fill(FAKE_HOST)
+        self.page.get_by_label("DSP address", exact=True).fill(FAKE_HOST)
         self.page.get_by_role("button", name="Connect", exact=True).click()
         self.page.locator("#status").get_by_text("Connected", exact=False).wait_for(timeout=20000)
         assert self.factory.hosts == [FAKE_HOST]

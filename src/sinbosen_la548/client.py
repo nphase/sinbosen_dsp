@@ -133,6 +133,8 @@ class Client:
     last_write: tuple[ParamSpec[Any], int, bytes] | None = None
 
     def __init__(self, ip: str, port: int = DEFAULT_PORT):
+        # `ip` may also be `usb` or `usb:<serial>` for a unit on USB HID
+        # (LA448); `port` is then unused. See usb.py.
         self._transport = Transport(ip, port)
 
     def connect(self, *, timeout: float = 2.0) -> None:

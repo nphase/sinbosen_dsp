@@ -21,8 +21,9 @@ write took effect (see "Transport safety model").
 
 ## Overview
 
-Everything uses **UDP port 8087**. Two unrelated sub-protocols share that
-port:
+On the network everything uses **UDP port 8087** (the LA448's USB port
+carries the application command protocol too; see "USB HID transport
+(LA448)"). Two unrelated sub-protocols share that port:
 
 1. The **CH9120 discovery/config protocol**, spoken by the WCH CH9120
    serial-to-Ethernet bridge chip in the unit's network interface
@@ -186,6 +187,42 @@ right after connecting, and are separate client methods:
 No dedicated session or "hello" opcode is known. Any of these reads
 establishes the link, and once the device has replied it also answers the
 keepalive.
+
+### USB HID transport (LA448)
+
+The LA448 carries the same application command protocol over its USB port
+(`usb.py`). Established on one unit (2026-11-14, macOS, hidapi):
+
+- It enumerates as a single vendor HID interface: VID `0x0483`, PID `0x5750`,
+  product string `AudioSystem` (space-padded), usage page `0x8C`, 64-byte input and output
+  reports, no report ID. There is no USB audio interface. `0483:5750` is
+  STMicro's stock custom-HID ID, so the client also matches the product
+  string.
+- A request frame is sent zero-padded in one 64-byte output report. A reply
+  longer than one report continues across consecutive input reports with no
+  per-report header, zero-padded after the `0xAA` tail: the 2479-byte
+  `READ_GROUP` reply arrives as 39 reports in about 0.96 s.
+- The device sends nothing unsolicited.
+- Replies carry version byte `0x0F` on every opcode seen (the LA548 uses
+  `0x0A` / `0x13`). Replies are not matched on that byte.
+- `READ_LOCK_STATE`, `HAND_SHAKE` (60-byte meter payload, as on the LA548),
+  `GET_USER_NAME` (750 bytes) and `READ_GROUP` (2464 bytes) all answer, and
+  the snapshot decodes with the DA0408X profile. With the 180 ms keepalive
+  running the link stayed up for 10 s and no frame was rejected.
+- `WRITE_MODULE_ID` is acknowledged: input 1's mute and gain were each
+  written with their existing value, readback matched, and the whole
+  snapshot was byte-identical before and after.
+
+Not established over USB:
+
+- A write that changes a value, and each control other than mute and gain.
+  The measurements in this document were all made on the LA548 over UDP.
+- Any request longer than one report (`WRITE_FIR_COEFS`, 2063 bytes). How
+  such a request must be split has never been observed, so `HidLink.sendto`
+  refuses it and sends nothing: FIR coefficient restore is unavailable over
+  USB. Every other implemented request fits in one report.
+- Whether the minimum send gap and the 0xD9 behaviour below apply; the
+  client keeps the same pacing and the same refusals on both transports.
 
 ## Opcodes
 

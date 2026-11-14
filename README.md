@@ -4,6 +4,10 @@ An independent Linux client, command-line tool and local web UI for the
 Sinbosen LA548 network audio DSP, so the unit can be controlled without the
 manufacturer's Windows-only app.
 
+It also drives the Sinbosen LA448 over its USB port: the LA448 speaks the same
+command protocol over USB HID, so every command below accepts `usb` in place
+of the IP address (see "LA448 over USB").
+
 See [the protocol reference](docs/PROTOCOL.md) for the wire format and
 control catalog, including what's confirmed live vs. still unverified.
 
@@ -45,6 +49,12 @@ Requires [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
+USB support (LA448) needs the optional `hidapi` dependency:
+
+```sh
+uv sync --extra usb
+```
+
 ## Usage
 
 The device's IP is shown on its own front panel - that's the reliable way to
@@ -79,6 +89,29 @@ uv run sinbosen-la548 write-fir-coefs <ip> 0 fir0.bin   # restore and verify tha
 uv run sinbosen-la548 channel-copy <ip> 0 1 4           # copy input channel 0's settings onto input channel 1 (this unit: 4 inputs/8 outputs, confirmed - use 8 for --output)
 uv run sinbosen-la548 diff-group before.bin after.bin  # locate a control's byte offset in a read_group dump
 ```
+
+### LA448 over USB
+
+Give `usb` wherever a command takes `<ip>`, or `usb:<serial>` when more than
+one unit is plugged in (`search` lists the serials). The same address works in
+`Client("usb")` and in the UI's address box.
+
+```sh
+uv run --extra usb sinbosen-la548 search               # lists usb:<serial> for each attached unit
+uv run --extra usb sinbosen-la548 status usb
+uv run --extra usb sinbosen-la548 dump-group usb backup.bin
+uv run --extra usb sinbosen-la548 set-volume usb 0 -6.0 --verify
+```
+
+Confirmed on a real LA448: the session, keepalive, lock state, program names
+and settings snapshot (it uses the same DA0408X layout), and acknowledged,
+readback-verified writes of mute and gain to their existing values. Not yet
+confirmed over USB: a write that changes a value, and each of the other
+controls; use `--verify`. `write-fir-coefs` (and the UI's FIR restore) is
+refused over USB without sending anything, because its request is longer than
+one 64-byte report and how to split it is unknown. Everything measured with the hardware-in-the-loop
+suite was measured on the LA548 over UDP. See docs/PROTOCOL.md, "USB HID
+transport (LA448)".
 
 What the CLI guarantees:
 

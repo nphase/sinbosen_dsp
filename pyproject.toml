@@ -14,6 +14,9 @@ ui = [
     "scipy>=1.15,<2",
     "plotly>=6.0,<7",
 ]
+usb = [
+    "hidapi>=0.14",
+]
 
 [project.scripts]
 sinbosen-la548 = "sinbosen_la548:main"
@@ -48,7 +51,7 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["scipy.*", "plotly.*"]
+module = ["scipy.*", "plotly.*", "hid"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
