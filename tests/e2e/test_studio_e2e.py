@@ -912,3 +912,136 @@ def test_delay_still_commits_when_leaving_the_field(studio: Studio) -> None:
     with studio.page.expect_response("**/api/edit"):
         delay.press("Tab")
     studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+
+
+def test_a_sideways_drag_keeps_an_unresolved_crossover_slope(connected_studio: Studio, unit: FakeUnit) -> None:
+    # 54 dB/oct decodes from the unit's raw slope 8, which no option offers. The engine refuses to write such a block,
+    # so the drag is refused; it must not be "fixed" by posting the nearest option, 48.
+    from dataclasses import replace
+
+    hp = unit.settings.outputs[2].hp
+    assert hp is not None
+    unit.set(ControlKey(True, 2, "hp"), replace(hp, enabled=True, slope_db_per_oct=54))
+    page = connected_studio.page
+    with page.expect_response("**/api/refresh"):
+        page.evaluate("fetch('/api/refresh', {method: 'POST', headers: {'Content-Type': 'application/json'}, "
+                      "body: '{}'})")
+    connected_studio.select("Out 3")
+    connected_studio.until("High-pass slope", "value", "54")
+    posts: list[dict[str, Any]] = []
+    page.on("request", lambda request: posts.append(json.loads(request.post_data or "{}"))
+            if "/api/edit" in request.url else None)
+    x, y = connected_studio.centre(connected_studio.handle("High-pass"))
+    mouse = page.mouse
+    mouse.move(x, y)
+    mouse.down()
+    mouse.move(x + 100, y + 3, steps=8)  # sideways, well under one 20 px slope step
+    mouse.up()
+    page.wait_for_timeout(400)
+    assert posts and all(set(p["values"]) == {"freq_hz"} for p in posts), posts
+    page.locator("#errors").get_by_text("xover slope out of range: 54 dB/oct (6-48)", exact=False).first.wait_for()
+    assert connected_studio.server_state()["selected"]["filters"][0]["fields"][2]["value"] == 54
+    assert unit.client.set_xover.call_count == 0
+    connected_studio.errors[:] = [e for e in connected_studio.errors if "status of 400" not in e]
+
+
+# Saving to a program slot
+
+def _open_save(studio: Studio) -> Any:
+    studio.page.get_by_role("button", name="Save", exact=True).click()
+    popover = studio.page.get_by_role("dialog", name="Save to program slot")
+    popover.get_by_role("button", name="Slot 30, user30").wait_for()
+    return popover
+
+
+def _saves(studio: Studio) -> list[str]:
+    saves: list[str] = []
+    studio.page.on("request", lambda request: saves.append(request.post_data or "")
+                   if request.url.endswith("/api/programs/save") else None)
+    return saves
+
+
+def test_save_opens_with_the_current_slot_preselected(studio: Studio) -> None:
+    popover = _open_save(studio)
+    current = popover.get_by_role("button", name="Slot 1, user1, current")
+    assert current.get_attribute("aria-pressed") == "true"
+    assert "current" in current.inner_text()
+    assert popover.get_by_role("button", name="Overwrite slot 1 (user1)").is_enabled()
+    popover.get_by_role("button", name="Slot 3, user3").click()
+    assert popover.get_by_role("button", name="Slot 3, user3").get_attribute("aria-pressed") == "true"
+    popover.get_by_role("button", name="Overwrite slot 3 (user3)").wait_for()
+
+
+def test_saving_asks_again_with_cancel_focused_and_enter_does_not_save(studio: Studio) -> None:
+    saves = _saves(studio)
+    page = studio.page
+    popover = _open_save(studio)
+    popover.get_by_role("button", name="Slot 3, user3").click()
+    popover.get_by_role("button", name="Overwrite slot 3 (user3)").click()
+    popover.get_by_text("Slot 3 (user3) will be replaced with the unit's current live settings. "
+                        "This cannot be undone.").wait_for()
+    cancel = popover.get_by_role("button", name="Cancel", exact=True)
+    assert cancel.evaluate("el => el === document.activeElement")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(300)
+    assert saves == []
+    popover.get_by_role("button", name="Overwrite slot 3 (user3)").click()
+    with page.expect_response("**/api/programs/save"):
+        popover.get_by_role("button", name="Overwrite", exact=True).click()
+    popover.wait_for(state="detached")
+    assert json.loads(saves[0]) == {"slot": 2, "apply_first": False}
+    page.locator("#hint").get_by_text("Saved to slot 3 (user3).").wait_for()
+    assert page.locator("#errors").inner_text() == ""
+    popover = _open_save(studio)
+    assert popover.get_by_role("button", name="Slot 3, user3, current").get_attribute("aria-pressed") == "true"
+
+
+def test_saving_with_an_unapplied_edit_applies_first(studio: Studio) -> None:
+    page = studio.page
+    with page.expect_response("**/api/edit"):
+        studio.field("Out 5 delay in ms").fill("1.5")
+        studio.field("Out 5 delay in ms").press("Enter")
+    assert studio.unapplied().inner_text() == "1 unapplied"
+    popover = _open_save(studio)
+    popover.get_by_text("You have 1 unapplied edit. The unit saves what is live on it, not your drafts.").wait_for()
+    popover.get_by_role("button", name="Apply and overwrite slot 1 (user1)").click()
+    with page.expect_response("**/api/programs/save"):
+        popover.get_by_role("button", name="Overwrite", exact=True).click()
+    page.locator("#hint").get_by_text("Saved to slot 1 (user1).").wait_for()
+    assert studio.unapplied().inner_text() == ""
+    assert studio.field("Out 5 delay in ms").input_value() == "1.50"
+
+
+def test_escape_closes_the_save_popover_without_saving(studio: Studio) -> None:
+    saves = _saves(studio)
+    popover = _open_save(studio)
+    popover.get_by_role("button", name="Overwrite slot 1 (user1)").click()
+    studio.page.keyboard.press("Escape")
+    popover.wait_for(state="detached")
+    assert studio.page.get_by_role("button", name="Save", exact=True).evaluate("el => el === document.activeElement")
+    studio.page.wait_for_timeout(200)
+    assert saves == []
+
+
+def test_saving_says_live_is_switched_off_and_a_locked_unit_reaches_the_error_bar(
+        connected_studio: Studio, unit: FakeUnit) -> None:
+    from sinbosen_la548.client import LockState
+
+    unit.client.get_program_names.return_value = tuple(f"User{n}" for n in range(1, 30)) + ("",)
+    unit.client.current_program = 4
+    page = connected_studio.page
+    page.get_by_role("checkbox", name="Live").check()
+    popover = connected_studio.page.get_by_role("button", name="Save", exact=True).click()
+    popover = page.get_by_role("dialog", name="Save to program slot")
+    assert popover.get_by_role("button", name="Slot 5, User5, current").get_attribute("aria-pressed") == "true"
+    assert popover.get_by_role("button", name="Slot 30, empty name").locator(".slot-name.empty").inner_text() \
+        == "empty name"
+    popover.get_by_role("button", name="Overwrite slot 5 (User5)").click()
+    popover.get_by_text("Live tuning will be switched off.", exact=False).wait_for()
+    unit.client.read_lock_state.return_value = LockState(True, "1234")
+    with page.expect_response("**/api/programs/save"):
+        popover.get_by_role("button", name="Overwrite", exact=True).click()
+    page.locator("#errors").get_by_text("device is locked; writes are disabled").wait_for()
+    assert page.locator("#hint").get_by_text("Saved to").count() == 0
+    unit.client.save_program.assert_not_called()
+    connected_studio.errors[:] = [e for e in connected_studio.errors if "status of 400" not in e]

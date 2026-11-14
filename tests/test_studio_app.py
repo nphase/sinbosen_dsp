@@ -596,3 +596,138 @@ def test_extra_allowed_hosts_work_and_no_cors_headers_are_sent(store: StudioStor
         assert client.get("/api/state", headers={"host": "other.lan"}).status_code == 400
         response = client.post("/api/select", json={"id": "out:1"}, headers={"origin": "http://127.0.0.1"})
         assert not any(h.lower().startswith("access-control-") for h in response.headers)
+
+
+# Program slots
+
+NAMES = tuple(f"User{n}" for n in range(1, 31))
+
+
+def test_demo_programs_list_30_slots_with_the_current_one_flagged(client: TestClient) -> None:
+    programs = client.get("/api/programs").json()
+    assert programs["current"] == 0
+    assert len(programs["slots"]) == 30
+    assert programs["slots"][0] == {"index": 0, "number": 1, "name": "user1", "current": True}
+    assert programs["slots"][29] == {"index": 29, "number": 30, "name": "user30", "current": False}
+    assert sum(slot["current"] for slot in programs["slots"]) == 1
+
+
+def test_connected_programs_come_from_the_unit(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = ("", *NAMES[1:])
+    device.client.current_program = 2
+    with connected(store, device) as client:
+        programs = client.get("/api/programs").json()
+    assert programs["current"] == 2
+    assert programs["slots"][0]["name"] == ""
+    assert [slot["index"] for slot in programs["slots"] if slot["current"]] == [2]
+
+
+def test_an_unknown_current_slot_flags_none(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    device.client.current_program = None
+    with connected(store, device) as client:
+        programs = client.get("/api/programs").json()
+    assert programs["current"] is None
+    assert not any(slot["current"] for slot in programs["slots"])
+
+
+def test_saving_in_the_demo_makes_the_slot_current(client: TestClient) -> None:
+    state = post(client, "/api/programs/save", slot=2, apply_first=False)
+    assert state["saved"] == {"slot": 2, "name": "user3"}
+    assert state["result"] is None
+    assert state["status"]["demo"] is True
+    assert client.get("/api/programs").json()["current"] == 2
+
+
+def test_saving_to_a_connected_unit(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    device.client.current_program = 0
+    device.client.save_program.side_effect = lambda slot: setattr(device.client, "current_program", slot)
+    with connected(store, device) as client:
+        state = post(client, "/api/programs/save", slot=3)
+        assert client.get("/api/programs").json()["current"] == 3
+    device.client.save_program.assert_called_once_with(3)
+    assert state["saved"] == {"slot": 3, "name": "User4"}
+
+
+def test_saving_with_pending_edits_and_no_apply_first_is_refused(client: TestClient) -> None:
+    post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+    response = client.post("/api/programs/save", json={"slot": 0, "apply_first": False})
+    assert response.status_code == 400
+    assert "pending" in response.json()["error"]
+
+
+def test_apply_first_applies_then_saves(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    order: list[str] = []
+    device.client.set_delay.side_effect = lambda channel, ms, **kwargs: (
+        order.append("apply"), setattr(device, "settings", replace_control(
+            device.settings, ControlKey(True, channel, "delay"), ms)))
+    device.client.save_program.side_effect = lambda slot: order.append("save")
+    with connected(store, device) as client:
+        post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+        state = post(client, "/api/programs/save", slot=1, apply_first=True)
+    assert order == ["apply", "save"]
+    assert state["result"]["ok"] is True
+    assert state["saved"] == {"slot": 1, "name": "User2"}
+    assert state["status"]["pending_count"] == 0
+
+
+def test_apply_first_saves_nothing_when_apply_reports_a_conflict(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    with connected(store, device) as client:
+        post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.0)
+        device.settings = replace_control(device.settings, ControlKey(True, 0, "delay"), 7.0)
+        state = post(client, "/api/programs/save", slot=1, apply_first=True)
+    device.client.save_program.assert_not_called()
+    assert state["saved"] is None
+    assert state["result"]["ok"] is False
+    assert state["result"]["conflicts"] == ["Output 1: delay"]
+    assert state["status"]["pending_count"] == 1
+
+
+def test_a_locked_unit_refuses_to_save(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    with connected(store, device) as client:
+        device.client.read_lock_state.return_value = LockState(True, "1234")
+        response = client.post("/api/programs/save", json={"slot": 0})
+    assert response.status_code == 400
+    assert "locked" in response.json()["error"]
+    device.client.save_program.assert_not_called()
+
+
+@pytest.mark.parametrize("slot", [-1, 30, 1.0, "1", True, None])
+def test_an_invalid_slot_is_400(client: TestClient, slot: Any) -> None:
+    response = client.post("/api/programs/save", json={"slot": slot})
+    assert response.status_code == 400
+    assert "error" in response.json()
+
+
+def test_apply_first_must_be_a_bool(client: TestClient) -> None:
+    assert client.post("/api/programs/save", json={"slot": 0, "apply_first": "yes"}).status_code == 400
+
+
+def test_programs_and_saving_while_disconnected_are_503(store: StudioStore) -> None:
+    device = FakeDevice()
+    device.client.get_program_names.return_value = NAMES
+    service = DSPService(demo_settings(), client_factory=lambda address: device.client)
+    with make_client(service, store) as client:
+        post(client, "/api/connect", address="usb")
+        service.close()
+        assert client.get("/api/programs").status_code == 503
+        response = client.post("/api/programs/save", json={"slot": 0})
+        assert response.status_code == 503
+        assert "error" in response.json()
+    device.client.save_program.assert_not_called()
+
+
+def test_programs_is_local_only(client: TestClient) -> None:
+    assert client.get("/api/programs", headers={"host": "evil.example"}).status_code == 400
+    assert client.post("/api/programs/save", content=b'{"slot": 0}',
+                       headers={"content-type": "text/plain"}).status_code == 415

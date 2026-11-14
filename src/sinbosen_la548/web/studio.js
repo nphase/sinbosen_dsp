@@ -5,6 +5,7 @@
 import { ApiError, getState, post } from "./api.js";
 import { createHandleGestures, targetOf } from "./handles.js";
 import { createPlot } from "./plot.js";
+import { createSavePopover } from "./save.js";
 
 const POLL_MS = 1000;
 const HINT = "Gain is sent when you press Enter; polarity and mute take effect immediately.";
@@ -32,7 +33,7 @@ const PLUS_ICON = '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 2
 let state = null;
 const ui = {
   typing: null,        // {id, text, error, busy}: the field being typed in
-  menu: null,          // {kind: "connection" | "link" | "sync", id}
+  menu: null,          // {kind: "connection" | "link" | "sync" | "save", id}
   focusMenu: false,
   address: "usb",
   connecting: false,
@@ -43,6 +44,7 @@ const ui = {
   handle: null,        // {key, target, before, values, dragging}: a plot handle being dragged, wheeled or nudged
   naming: null,        // the id of the channel whose name is being edited in its strip
   selectedCard: null,  // {channel, key}: the card whose handle was clicked
+  notice: null,        // {text, message}: a confirmation shown in place of the status message `message`
 };
 let fields = new Map();   // data-field -> field spec, rebuilt on every render
 let actions = new Map();  // data-action -> handler, rebuilt on every render
@@ -75,6 +77,7 @@ function icon(markup) {
 }
 
 const cls = (...names) => names.filter(Boolean).join(" ");
+const savePopover = createSavePopover({ ui, state: () => state, h, act, cls, below, send, render });
 
 function act(handler) {
   const id = String(actions.size);
@@ -340,6 +343,14 @@ function topBar() {
       "data-action": act(() => send("/api/revert")) }, "Revert"),
     h("button", { type: "button", class: "button primary", disabled: !pending,
       "data-action": act(() => send("/api/apply")) }, "Apply"),
+    h("button", {
+      type: "button", id: "save", class: "button", "aria-haspopup": "dialog",
+      "aria-expanded": String(ui.menu?.kind === "save"), disabled: !status.connected && !status.demo,
+      title: "Save the unit's live settings to a program slot", "data-action": act(() => {
+        openMenu("save");
+        if (ui.menu) savePopover.load();
+      }),
+    }, "Save"),
   ];
 }
 
@@ -444,9 +455,12 @@ function strip(channel) {
     }, link ? `Link ${link.letter}` : "Link")));
 }
 
+// A save's confirmation stands until the status message changes, that is until the next action reports something.
 function hint() {
+  const message = state.status.message;
+  const notice = ui.notice?.message === message ? ui.notice.text : null;
   return [h("span", null, `${HINT} ${state.status.live ? HINT_LIVE : HINT_DRAFT}`),
-    h("span", { class: "message" }, state.status.message)];
+    h("span", { class: cls("message", notice && "notice") }, notice ?? message)];
 }
 
 function selectedBar() {
@@ -626,10 +640,11 @@ function overlay() {
   const items = [];
   const menu = ui.menu;
   if (menu) {
-    const anchorId = { connection: "connection", link: `link-${menu.id}`, sync: "sync-chip" }[menu.kind];
+    const anchorId = { connection: "connection", link: `link-${menu.id}`, sync: "sync-chip", save: "save" }[menu.kind];
     const anchor = document.getElementById(anchorId);
     const built = !anchor ? null : menu.kind === "connection" ? connectionPopover(anchor)
-      : menu.kind === "link" ? linkMenu(menu.id, anchor) : syncMenu(anchor);
+      : menu.kind === "link" ? linkMenu(menu.id, anchor) : menu.kind === "save" ? savePopover.popover(anchor)
+        : syncMenu(anchor);
     if (built) items.push(built);
     else ui.menu = null;
   }
@@ -665,7 +680,8 @@ function render() {
   patch("overlay", overlay());
   if (ui.focusMenu) {
     ui.focusMenu = false;
-    document.querySelector("#overlay .menu-item:not(:disabled), #overlay input")?.focus();
+    (document.querySelector("#overlay [data-autofocus]:not(:disabled)")
+      ?? document.querySelector("#overlay .menu-item:not(:disabled), #overlay input"))?.focus();
   }
 }
 
@@ -706,7 +722,7 @@ document.addEventListener("keydown", (event) => {
   const el = event.target;
   if (event.key === "Escape") {
     if (ui.menu) {
-      const anchor = document.getElementById({ connection: "connection", sync: "sync-chip" }[ui.menu.kind]
+      const anchor = document.getElementById({ connection: "connection", sync: "sync-chip", save: "save" }[ui.menu.kind]
         ?? `link-${ui.menu.id}`);
       ui.menu = null;
       render();

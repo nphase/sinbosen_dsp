@@ -131,6 +131,8 @@ class Client:
     # (spec, channel_id, payload) of the last acknowledged _write_param call,
     # so a caller can verify readback against exactly what was sent.
     last_write: tuple[ParamSpec[Any], int, bytes] | None = None
+    # The program slot carried by the last ReadGroup (0xA9) reply's user_id; None before any reply.
+    _current_program: int | None = None
 
     def __init__(self, ip: str, port: int = DEFAULT_PORT):
         # `ip` may also be `usb` or `usb:<serial>` for a unit on USB HID
@@ -167,6 +169,13 @@ class Client:
     def address(self) -> str:
         """`usb:<serial>` for a USB link, otherwise the address the client was created with."""
         return self._transport.address
+
+    @property
+    def current_program(self) -> int | None:
+        """The unit's current program slot (0-based) as the last `read_group()` reply reported it, or None
+        before any reply. Saving or loading a slot makes it current (docs/PROTOCOL.md, "A power cycle discards
+        live changes"); this sends nothing, so it is only as fresh as the last settings read."""
+        return self._current_program
 
     @property
     def link_up(self) -> bool:
@@ -228,7 +237,7 @@ class Client:
         read-only. The reply is matched by opcode only: its user_id is the
         unit's current program slot, not an echo of the request's, so a
         unit whose current program isn't slot 0 would never match
-        (docs/PROTOCOL.md). Returns the raw blob; use read_settings() for the
+        (docs/PROTOCOL.md); it is kept as `current_program`. Returns the raw blob; use read_settings() for the
         supported DA0408X layout. Other layouts remain opaque. There is no
         matching write_group(): WriteGroup (0xA8) is a single whole-blob
         frame, not chunked, but it overwrites every setting at once, its
@@ -237,6 +246,7 @@ class Client:
         restore (0xC9, see write_fir_coefs) is unverified (docs/PROTOCOL.md).
         """
         frame = self._transport.request(Opcode.READ_GROUP, timeout=timeout)
+        self._current_program = frame.user_id
         return frame.payload
 
     def read_settings(

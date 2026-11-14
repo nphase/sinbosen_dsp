@@ -31,6 +31,7 @@ from .settings import (
 
 # Blocks that reach the device the moment they are edited, without the Apply step.
 IMMEDIATE_BLOCKS: frozenset[str] = frozenset({"gain", "polarity", "mute"})
+PROGRAM_SLOTS = 30
 
 
 def demo_settings() -> DeviceSettings:
@@ -88,6 +89,13 @@ class DraftState:
     revision: int = 0
     message: str = "Offline demo — changes do not reach hardware."
     host: str | None = None
+
+
+@dataclass(frozen=True)
+class ProgramSlots:
+    """The unit's program-slot names (0-based) and its current slot, None when it is not known."""
+    names: tuple[str, ...]
+    current: int | None
 
 
 @dataclass(frozen=True)
@@ -320,6 +328,7 @@ class DSPService:
         self._factory = client_factory
         self._client: Client | None = None
         self._demo_programs: dict[tuple[str, int], DeviceSettings] = {}
+        self._demo_current: dict[str, int] = {}
         self._sessions: dict[str, DraftState] = {}
         self._generation = 0
         self._lock = threading.RLock()
@@ -333,6 +342,7 @@ class DSPService:
     def drop_session(self, token: str) -> None:
         with self._lock:
             self._sessions.pop(token, None)
+            self._demo_current.pop(token, None)
             for key in list(self._demo_programs):
                 if key[0] == token:
                     self._demo_programs.pop(key)
@@ -370,6 +380,22 @@ class DSPService:
             for state in self._sessions.values():
                 state.live = False
                 state.due_at = None
+
+    def programs(self, token: str) -> ProgramSlots:
+        """The slot names and the current slot. Connected, the names are read from the unit (read-only) and the
+        current slot is the one its last settings readback reported; the demo has user1..user30, starting in slot 1."""
+        with self._lock:
+            state = self._state(token)
+            if state.demo:
+                return ProgramSlots(tuple(f"user{n}" for n in range(1, PROGRAM_SLOTS + 1)),
+                                    self._demo_current.get(token, 0))
+            if not self.view(token).connected or self._client is None:
+                raise ConnectionError("connect before reading program slots")
+            names = self._client.get_program_names()
+            current = self._client.current_program
+            # Never guessed: anything but a slot number the unit could have is reported as unknown.
+            known = type(current) is int and 0 <= current < len(names)
+            return ProgramSlots(names, current if known else None)
 
     def connect(self, token: str, ip: str) -> None:
         with self._lock:
@@ -504,7 +530,7 @@ class DSPService:
                 raise ValueError("Apply or revert pending edits before program/copy operations")
             if kind not in ("save", "load", "copy"):
                 raise ValueError("unsupported device operation")
-            if type(slot) is not int or not 0 <= slot < 30:
+            if type(slot) is not int or not 0 <= slot < PROGRAM_SLOTS:
                 raise ValueError("program slot must be in the DA0408X range 0-29")
             count = state.draft.profile.output_count if output else state.draft.profile.input_count
             if kind == "copy":
@@ -519,10 +545,12 @@ class DSPService:
                 observed = state.baseline
                 if kind == "save":
                     self._demo_programs[token, slot] = observed
+                    self._demo_current[token] = slot
                 elif kind == "load":
                     if (token, slot) not in self._demo_programs:
                         raise ValueError("save this demo slot before loading it")
                     observed = self._demo_programs[token, slot]
+                    self._demo_current[token] = slot
                 else:
                     channels = list(observed.outputs if output else observed.inputs)
                     for destination in targets:

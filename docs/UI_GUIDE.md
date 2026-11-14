@@ -37,7 +37,7 @@ prints a warning.
   (an IP address, `usb` or `usb:<serial>`) with **Connect**, **Refresh**,
   **Disconnect** and **Offline demo**. Then the Tune tab, the selected
   channel's latency (see "Latency" below), the **Live** toggle, the count of
-  unapplied changes, **Revert** and **Apply**.
+  unapplied changes, **Revert**, **Apply** and **Save** (see "Saving" below).
 - **Channel strips.** All 4 inputs (`In A` to `In D`) and 8 outputs (`Out 1` to
   `Out 8`) in one row. Each strip has a header with its label and nickname, gain
   (dB), delay (ms), polarity (Ø), mute (M) and a link button. Clicking the
@@ -73,6 +73,37 @@ Live needs a connected unit.
 a control you have a draft for was changed on the unit in the meantime, it
 reports the conflict and changes nothing. **Disconnect** and **Offline demo**
 discard the drafts; with unapplied edits the box asks before doing either.
+
+### Saving
+
+Writes, Apply and Live change only the unit's live settings. When the unit is
+switched off it forgets them and starts again from its current program slot
+(see "A power cycle discards live changes" in [PROTOCOL.md](PROTOCOL.md)). To
+keep a tuning, save it to a program slot:
+
+1. Click **Save** in the top bar. The popover lists the unit's 30 program slots
+   by number and stored name (an empty name shows as a dim "empty name"). The
+   unit's current slot is marked "current" and preselected; if the unit has not
+   reported it, nothing is preselected.
+2. Choose a slot and press the button that names it, for example **Overwrite
+   slot 3 (user3)**.
+3. The popover asks again: "Slot 3 (user3) will be replaced with the unit's
+   current live settings. This cannot be undone." **Cancel** has the focus, so
+   Enter does not confirm; press **Overwrite** to save. Escape closes the
+   popover without saving.
+
+After a save the popover closes, the status line says "Saved to slot 3
+(user3).", and that slot is the unit's current one, the one it starts in.
+
+The unit saves what is live on it, not your drafts. With unapplied edits the
+popover says so and the button reads **Apply and overwrite slot 3 (user3)**: it
+runs Apply first and saves only if Apply reports no errors or conflicts and the
+readback verified; otherwise nothing is saved and Apply's result is shown.
+Saving switches Live off, and the confirmation says so when Live is on. A
+locked or disconnected unit, or a failed write or readback, is reported in the
+error bar, and nothing is reported as saved. In the offline demo the slots are
+named user1 to user30 and saving is simulated. Loading and renaming slots are
+not in the new UI yet.
 
 ### Links
 
@@ -172,7 +203,8 @@ file, `~/.config/sinbosen-la548/studio.json`, under a key for the unit: its
 These need `--classic` for now:
 
 - the mixer (routing matrix);
-- programs and presets, including saving and loading programs and channel copy;
+- loading programs, presets and channel copy (saving is on the Tune screen, see
+  "Saving");
 - measured traces, the Measured overlay and alignment;
 - FIR coefficient backup and restore;
 - editing the limiter, compressor, FIR and the other advanced blocks

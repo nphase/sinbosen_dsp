@@ -263,8 +263,11 @@ export function createPlot(container, hooks) {
     if (hasGain) {
       values.gain_db = round(clamp(values0.gain_db - (at.y - start.y) / drag.scale, bounds(key, "gain_db")), 1);
     } else if (slopes) {
+      // The slope is posted only once the drag has stepped it, so a sideways drag never snaps a stored slope that
+      // is not one of the options. Back at no step after stepping, it posts the option nearest the stored slope.
       const steps = Math.trunc((event.clientY - drag.client[1]) / SLOPE_STEP_PX);
-      values.slope_db_per_oct = stepSlope(slopes, values0.slope_db_per_oct, steps);
+      if (steps) drag.sloped = true;
+      if (drag.sloped) values.slope_db_per_oct = stepSlope(slopes, values0.slope_db_per_oct, steps);
     }
     return values;
   }
@@ -288,7 +291,7 @@ export function createPlot(container, hooks) {
     const slopes = !hasGain && values0.slope_db_per_oct !== undefined
       ? slopesOf(current.filters.find((f) => f.key === key)) : null;
     drag = { key, pointerId: event.pointerId, start: point(event), client: [event.clientX, event.clientY], values0,
-      values: null, moved: false, hasGain, slopes, scale: current.scale, range: current.range };
+      values: null, moved: false, hasGain, slopes, sloped: false, scale: current.scale, range: current.range };
     el.setPointerCapture(event.pointerId);
     const before = { freq_hz: values0.freq_hz };
     if (hasGain) before.gain_db = values0.gain_db;

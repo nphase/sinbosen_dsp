@@ -485,6 +485,25 @@ def test_read_group_accepts_a_reply_carrying_the_current_program(current_program
         transport.stop()
 
 
+def test_current_program_is_unknown_until_a_read_group_reply_carries_it():
+    client, fake = client_with_fake_transport()
+    assert client.current_program is None
+    fake.request = lambda opcode, payload=b"", **kwargs: Frame(  # type: ignore[method-assign]
+        opcode=opcode, version=0x13, user_id=29, payload=b"blob")
+    client.read_group()
+    assert client.current_program == 29
+
+
+def test_current_program_follows_the_latest_read_group_reply():
+    client, fake = client_with_fake_transport()
+    replies = iter((7, 0))
+    fake.request = lambda opcode, payload=b"", **kwargs: Frame(  # type: ignore[method-assign]
+        opcode=opcode, version=0x13, user_id=next(replies), payload=b"blob")
+    client.read_group()
+    client.read_group()
+    assert client.current_program == 0
+
+
 def test_read_mix_matrix_decodes_confirmed_layout():
     client, fake = client_with_fake_transport()
     fake.responses[Opcode.READ_GROUP] = _read_group_sample()

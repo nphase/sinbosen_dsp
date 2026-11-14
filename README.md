@@ -182,7 +182,7 @@ UI has no authentication and can change the device's output levels, so the
 launcher prints a warning when you do.
 
 The Tune screen is one dense page: a top bar (connection, Live, count of
-unapplied changes, Revert, Apply), a strip per channel (all 4 inputs and 8
+unapplied changes, Revert, Apply, Save), a strip per channel (all 4 inputs and 8
 outputs) with nickname, gain, delay, polarity, mute and link, a full-width
 response plot, and filter cards for the selected channel, which is Out 1 when
 the page opens. Gain, polarity and mute are written at once (a typed gain when
@@ -197,7 +197,7 @@ nickname is edited by double-clicking it. Nicknames and links are kept in
 `~/.config/sinbosen-la548/studio.json` on this computer, not on the device.
 
 Not yet in the new UI, and available only with `--classic`: the mixer,
-programs and presets, measured traces and alignment, FIR coefficient
+loading programs, presets, measured traces and alignment, FIR coefficient
 backup/restore, and editing the limiter, compressor, FIR and the other
 advanced blocks.
 
@@ -213,6 +213,16 @@ See the [UI guide](docs/UI_GUIDE.md) for both. The new screen has only been
 exercised in offline demo and with fakes in tests, not on a real unit. For the
 classic UI, automated offline checks pass; its hardware acceptance and OSM
 display comparison remain opt-in verification work.
+
+### Saving
+
+Everything you send to the unit, including Apply, changes only its live
+settings, and the unit forgets them when it is switched off: it starts again
+from its current program slot. To keep a tuning, click **Save** in the top bar,
+choose one of the unit's 30 program slots (the current one is preselected),
+press the button that names it and confirm; the unit stores its live settings there and that slot becomes
+the one it starts in. With unapplied edits, Save applies them first and saves
+only if Apply succeeds. Saving switches Live off.
 
 ## Development
 

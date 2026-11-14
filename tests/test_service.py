@@ -133,6 +133,69 @@ def test_operation_readback_loss_disconnects_and_disables_live(rig):
     assert not service.view(token).live
 
 
+def test_demo_programs_are_named_user1_to_user30_and_saving_makes_a_slot_current(rig):
+    service, token, device = rig
+    programs = service.programs(token)
+    assert programs.names == tuple(f"user{n}" for n in range(1, 31))
+    assert programs.current == 0
+    service.operation(token, "save", slot=4)
+    assert service.programs(token).current == 4
+    device.client.save_program.assert_not_called()
+
+
+def test_connected_programs_read_the_names_and_the_current_slot_from_the_unit(rig):
+    service, token, device = rig
+    device.client.get_program_names.return_value = tuple(f"User{n}" for n in range(1, 31))
+    device.client.current_program = 2
+    service.connect(token, "127.0.0.1")
+    programs = service.programs(token)
+    assert programs.names[2] == "User3"
+    assert programs.current == 2
+
+
+@pytest.mark.parametrize("current", [None, 30, -1, True])
+def test_an_unknown_or_impossible_current_slot_is_none(rig, current):
+    service, token, device = rig
+    device.client.get_program_names.return_value = tuple(f"User{n}" for n in range(1, 31))
+    device.client.current_program = current
+    service.connect(token, "127.0.0.1")
+    assert service.programs(token).current is None
+
+
+def test_programs_need_a_connection(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    service.close()
+    with pytest.raises(ConnectionError):
+        service.programs(token)
+    device.client.get_program_names.assert_not_called()
+
+
+def test_saving_with_a_fake_client_saves_and_reads_back(rig):
+    service, token, device = rig
+    device.client.current_program = 0
+    service.connect(token, "127.0.0.1")
+    device.client.save_program.side_effect = lambda slot: setattr(device.client, "current_program", slot)
+    service.operation(token, "save", slot=3)
+    device.client.save_program.assert_called_once_with(3)
+    assert device.client.read_settings.call_count == 3  # connect, before and after the save
+    device.client.get_program_names.return_value = tuple(f"User{n}" for n in range(1, 31))
+    assert service.programs(token).current == 3
+
+
+def test_saving_is_refused_with_pending_drafts_and_on_a_locked_unit(rig):
+    service, token, device = rig
+    service.connect(token, "127.0.0.1")
+    service.stage(token, ControlKey(True, 0, "delay"), 1)
+    with pytest.raises(ValueError, match="pending"):
+        service.operation(token, "save", slot=0)
+    service.revert(token)
+    device.client.read_lock_state.return_value = LockState(True, "1234")
+    with pytest.raises(PermissionError, match="locked"):
+        service.operation(token, "save", slot=0)
+    device.client.save_program.assert_not_called()
+
+
 def test_demo_program_copy_and_backups(rig):
     service, token, device = rig
     service.operation(token, "save", slot=1)

@@ -37,3 +37,4 @@ async function call(method, path, body) {
 
 export const getState = () => call("GET", "/api/state");
 export const post = (path, body) => call("POST", path, body);
+export const getPrograms = () => call("GET", "/api/programs");

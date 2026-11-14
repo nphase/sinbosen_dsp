@@ -24,7 +24,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import links
-from .service import ApplyResult, ControlKey, DSPService, demo_settings
+from .service import PROGRAM_SLOTS, ApplyResult, ControlKey, DSPService, demo_settings
 from .settings import CrossoverSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import band_in_use, build_state
@@ -139,7 +139,7 @@ class _Studio:
     def refresh(self, body: dict[str, Any]) -> None:
         self.service.refresh(self.token)
 
-    def apply(self, body: dict[str, Any]) -> ApplyResult | None:
+    def apply(self, body: dict[str, Any]) -> ApplyResult:
         result = self.service.apply(self.token)
         self.live_errors = ""
         return result
@@ -165,6 +165,27 @@ class _Studio:
                 self.live_errors = str(error)
                 with contextlib.suppress(Exception):
                     self.service.set_live(self.token, False)
+
+    def programs(self) -> dict[str, Any]:
+        slots = self.service.programs(self.token)
+        return {"slots": [{"index": i, "number": i + 1, "name": name, "current": i == slots.current}
+                          for i, name in enumerate(slots.names)], "current": slots.current}
+
+    def save(self, body: dict[str, Any]) -> tuple[ApplyResult | None, dict[str, Any] | None]:
+        """Save the unit's live settings to a slot. With `apply_first`, Apply runs first and the save happens only
+        when it reports ok; otherwise nothing is saved and its result is returned."""
+        slot = _index(body, "slot")
+        if not 0 <= slot < PROGRAM_SLOTS:
+            raise ValueError(f"slot must be 0-{PROGRAM_SLOTS - 1}")
+        apply_first = _flag(body, "apply_first") if "apply_first" in body else False
+        names = self.service.programs(self.token).names
+        result = None
+        if apply_first:
+            result = self.apply(body)
+            if not _result_json(result)["ok"]:
+                return result, None
+        self.service.operation(self.token, "save", slot=slot)
+        return result, {"slot": slot, "name": names[slot]}
 
     # View
 
@@ -402,6 +423,26 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
 
         return await run_in_threadpool(respond, current)
 
+    async def get_programs(request: Request) -> Response:
+        def current() -> dict[str, Any]:
+            with studio.lock:
+                return studio.programs()
+
+        return await run_in_threadpool(respond, current)
+
+    async def save_program(request: Request) -> Response:
+        try:
+            body = await read_body(request)
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+
+        def save() -> dict[str, Any]:
+            with studio.lock:
+                result, saved = studio.save(body)
+                return {**studio.state(), "result": None if result is None else _result_json(result), "saved": saved}
+
+        return await run_in_threadpool(respond, save)
+
     async def index(request: Request) -> Response:
         return FileResponse(WEB_DIR / "index.html")
 
@@ -441,6 +482,8 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
         post_route("/api/unlink", studio.unlink),
         post_route("/api/link/sections", studio.link_sections),
         post_route("/api/link/sync", studio.link_sync),
+        Route("/api/programs", get_programs, methods=["GET"]),
+        Route("/api/programs/save", save_program, methods=["POST"]),
     ]
     if WEB_DIR.is_dir():
         routes += [Route("/", index, methods=["GET"]), Mount("/static", StaticFiles(directory=WEB_DIR))]
