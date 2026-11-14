@@ -6,6 +6,7 @@ import { ApiError, getState, post } from "./api.js";
 import { createHandleGestures, targetOf } from "./handles.js";
 import { createMixer } from "./mixer.js";
 import { createPlot } from "./plot.js";
+import { createRewDialog } from "./rew.js";
 import { createSavePopover } from "./save.js";
 
 const POLL_MS = 1000;
@@ -48,7 +49,7 @@ let state = null;
 const ui = {
   tab: storedTab(),    // "tune" or "mixer": page state, not the server's
   typing: null,        // {id, text, error, busy}: the field being typed in
-  menu: null,          // {kind: "connection" | "link" | "sync" | "save", id}
+  menu: null,          // {kind: "connection" | "link" | "sync" | "save" | "rew", id}
   focusMenu: false,
   address: "usb",
   connecting: false,
@@ -93,6 +94,7 @@ function icon(markup) {
 
 const cls = (...names) => names.filter(Boolean).join(" ");
 const savePopover = createSavePopover({ ui, state: () => state, h, act, cls, below, send, render });
+const rewDialog = createRewDialog({ ui, state: () => state, h, act, below, send, render });
 const mixer = createMixer({ state: () => state, h, act, cls, send, render });
 
 function act(handler) {
@@ -518,7 +520,7 @@ function selectedBar() {
   } else {
     items.push(h("div", { class: "muted" }, "Not linked"));
   }
-  items.push(h("div", { class: "spacer" }), h("div", { class: "muted" }, "Show"));
+  items.push(rewDialog.button(), h("div", { class: "spacer" }), h("div", { class: "muted" }, "Show"));
   for (const [option, label, key] of PLOT_OPTIONS) {
     items.push(check(label, key in state.plot, (el) => send("/api/plot", { [option]: el.checked })));
   }
@@ -668,11 +670,12 @@ function overlay() {
   const items = [];
   const menu = ui.menu;
   if (menu) {
-    const anchorId = { connection: "connection", link: `link-${menu.id}`, sync: "sync-chip", save: "save" }[menu.kind];
+    const anchorId = { connection: "connection", link: `link-${menu.id}`, sync: "sync-chip", save: "save",
+      rew: "rew-import" }[menu.kind];
     const anchor = document.getElementById(anchorId);
     const built = !anchor ? null : menu.kind === "connection" ? connectionPopover(anchor)
       : menu.kind === "link" ? linkMenu(menu.id, anchor) : menu.kind === "save" ? savePopover.popover(anchor)
-        : syncMenu(anchor);
+        : menu.kind === "rew" ? rewDialog.dialog(anchor) : syncMenu(anchor);
     if (built) items.push(built);
     else ui.menu = null;
   }
@@ -760,8 +763,8 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
   } else if (event.key === "Escape") {
     if (ui.menu) {
-      const anchor = document.getElementById({ connection: "connection", sync: "sync-chip", save: "save" }[ui.menu.kind]
-        ?? `link-${ui.menu.id}`);
+      const anchor = document.getElementById({ connection: "connection", sync: "sync-chip", save: "save",
+        rew: "rew-import" }[ui.menu.kind] ?? `link-${ui.menu.id}`);
       ui.menu = null;
       render();
       anchor?.focus();

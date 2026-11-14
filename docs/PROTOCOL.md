@@ -812,6 +812,72 @@ type, slope, enabled, output=False)` (every field required except
 --freq HZ [--gain DB] --q Q --type N --slope N {--enable|--disable}
 [--output]`.
 
+#### Importing REW filters (`rew.py`, `import-rew`, the Studio's Import from REW)
+
+`rew.py` reads the file Room EQ Wizard writes with File > Export > "Export
+filter settings as text" and maps it onto a channel's EQ bands and, on an
+output, its crossover. It adds no wire format: every band goes through
+`Client.set_eq_band` and every crossover through `Client.set_xover`. Nothing
+here has been measured on hardware; the mapping rests on the response models
+above. In particular the PK Q conversion follows the documented device model
+(below) and has not been checked by measurement on a unit.
+
+Only exports made with REW's **Generic** equaliser are accepted, because
+other equalisers use other Q conventions (REW help, "Equaliser
+selection"). A file with a different `Equaliser:` line is refused; a file
+with no header is taken to be Generic. Numbers may use a decimal point or a
+decimal comma.
+
+| REW type | Device | Notes |
+|---|---|---|
+| `PK`, `PEQ`, `Modal` | EQ band, type 0 peaking | REW's Generic PK is the RBJ peaking filter with bandwidth `fc/Q` between the half-gain points. The device applies RBJ after `Q_effective = Q_wire / 10**(abs(gain_db)/40)`, so the stored Q is `Q_rew * 10**(abs(gain_db)/40)` |
+| `AP` | EQ band, type 4 second-order allpass | Q stored as given, gain 0 |
+| `HP`, `LP` | crossover, Butterworth 12 dB/oct | REW's Generic HP/LP are second order with Q 0.7071; a Q other than that in the line is refused |
+| `HP1`, `LP1` | crossover, Butterworth 6 dB/oct | first order, -3 dB at Fc |
+| `HPQ`, `LPQ` | crossover, 12 dB/oct | the Q in the line picks the family: 0.707 is Butterworth, 0.5 is Linkwitz-Riley; any other Q has no device equivalent and is refused |
+| `LS`, `HS` and variants (`LSC`, `LS Q`, `LS 6dB`, `LS 12dB`, ...) | refused | the device's shelves have fixed, non-standard shapes and ignore Q |
+| any other `HP...`/`LP...` kind (`LP 24dB`, ...) | refused | no exact device equivalent |
+| `NO` | refused | REW's notch is full depth; type 5 is a finite cut with its own bandwidth rule |
+| anything else (`BP`, Linkwitz Transform, ...) | refused | no equivalent |
+| `None` slots and `OFF` filters | skipped | |
+
+A crossover filter maps only where the device's modelled response
+(`response.crossover_response`) equals REW's filter; `tests/test_rew.py` checks
+each mapped kind against the textbook magnitude within 0.1 dB at nine
+frequencies from two octaves below to two octaves above Fc. A channel has one
+high-pass and one low-pass: the first of each that maps is used and a second
+one is refused ("the channel has one high-pass"). An input channel has no
+crossover, so HP and LP are refused there. Crossover Fc is stored in whole
+hertz like the EQ's.
+
+The crossover is replaced only when the file contains that filter: a file with
+no HP leaves the channel's high-pass exactly as it is, and the same for the
+low-pass.
+
+An EQ filter is also refused when it has no Q (for example `BW Oct` exports),
+its frequency rounds outside 10-20000 Hz, its gain is outside +-20 dB, or
+its stored Q falls outside the encodable 0.404-28.85. A high-Q filter with
+a large gain can exceed that limit even though REW's own Q does not: a
+-12 dB filter doubles the stored Q.
+
+Frequency is stored in whole hertz and Q in the bandwidth steps above, so
+the import prints each band with the values the device will hold and notes
+any that differ from the file. Filters take bands 1, 2, ... in file order;
+every other band that is in use (enabled, non-zero gain or not a parametric
+band) is reset to a disabled 0 dB parametric band keeping its frequency and
+Q, as the Studio's remove-band action does, so the channel's EQ becomes
+exactly the file. More filters than the channel has bands (7 input, 15
+output) is an error.
+
+`rew.staged_controls(settings, text, output=..., channel=...)` returns the
+same result as draft edits for `DSPService.stage_many`: the EQ bands and the
+crossovers the file has; bands and crossovers that already hold the wanted
+values are left out. The Studio's `POST /api/rew/preview` and
+`/api/rew/import` use it (preview stages nothing; import stages drafts through
+the same link propagation as a hand edit). The `import-rew` command sets EQ
+bands only: a file with HP or LP is refused unless `--skip-unsupported`, and
+the crossover is set with `set-xover`.
+
 #### EQ all-bypass and all-reset (0xAF, 0xB0)
 
 Both use `module_id=4`, `channel_type` IN or OUT, `channel_id` = the

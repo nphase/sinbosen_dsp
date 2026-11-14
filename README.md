@@ -75,6 +75,8 @@ uv run sinbosen-la548 set-delay <ip> 0 12.5            # 12.5 ms
 uv run sinbosen-la548 set-delay <ip> 0 12.5 --verify   # ...then read settings back and confirm the stored value
 uv run sinbosen-la548 set-xover <ip> 0 hp --freq 80 --type 1 --slope 24 --enable   # output channel only
 uv run sinbosen-la548 set-eq-band <ip> 0 0 --freq 45 --q 1.0 --type 4 --slope 0 --enable   # AllPass at 45 Hz, gain auto-zeroed
+uv run sinbosen-la548 import-rew <ip> 0 filters.txt --output --dry-run   # show how a REW filter export maps onto output 0's EQ bands; sends nothing
+uv run sinbosen-la548 import-rew <ip> 0 filters.txt --output --verify    # replace output 0's EQ with it, then read back
 uv run sinbosen-la548 eq-bypass <ip> 0 on               # exits locally as unsupported; sends no packet
 uv run sinbosen-la548 eq-reset <ip> 0                   # exits locally as unsupported; reset bands individually
 uv run sinbosen-la548 set-dynamic-eq-band <ip> 0 0 --freq 100 --gain 6 --q 2 --type 0 --slope 0 --startup-mode 0 --start-time 1 --release-time 100 --ratio 4 --threshold -20 --enable  # input-only
@@ -132,6 +134,16 @@ What the CLI guarantees:
 - **`write-fir-coefs`** refuses a locked device and backs up the current
   block first. If the readback doesn't match, it restores the backed-up
   block.
+- **`import-rew`** reads REW's "Export filter settings as text" file for the
+  Generic equaliser. PK (and Modal) filters become peaking bands and AP
+  becomes the second-order allpass; it replaces the channel's EQ, resetting
+  bands the file does not use. It sets EQ bands only: shelves, low/high-pass
+  (set those with `set-xover`), notch and anything out of the device's range
+  are refused with a reason before any packet is sent (`--skip-unsupported`
+  imports the rest). The Studio's Tune screen has an **Import from REW...**
+  button that also loads HP and LP into the crossover. See docs/PROTOCOL.md,
+  "Importing REW filters"; the PK Q conversion follows the documented device
+  model and has not been checked by measurement on a unit.
 - **`diff-group`** exits like diff(1): 0 identical, 1 different (including a
   length mismatch), 2 when a file can't be read.
 
@@ -201,6 +213,16 @@ column per output, each crossing a toggle (the unit routes on or off, with no
 level). The strips stay above it. A routing change is a draft like a filter
 edit, shown unapplied until **Apply** (or sent by **Live**), so a stray click
 cannot send a full-range signal to a tweeter at once.
+
+**Import from REW...** on the selected-channel bar loads a Room EQ Wizard
+"Export filter settings as text" file (Generic equaliser) into the channel as
+drafts. It overrides the channel's EQ: every band in use is overwritten or
+cleared. It replaces the high-pass or low-pass only when the file has one, and
+leaves the other alone. A dialog first states what will be overwritten, what
+will be loaded and what cannot be imported (shelves, notches, other HP/LP
+kinds). The Q conversion for peaking filters follows the documented device
+model and has not been checked by measurement on a unit. See
+[docs/UI_GUIDE.md](docs/UI_GUIDE.md).
 
 Not yet in the new UI, and available only with `--classic`: loading programs, presets, measured traces and alignment, FIR coefficient
 backup/restore, and editing the limiter, compressor, FIR and the other

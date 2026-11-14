@@ -17,7 +17,7 @@ from .response import Response, channel_response, frequency_grid
 from .service import Change, ControlKey, ServiceView
 from .settings import ChannelSettings, CrossoverSettings, DeviceSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup
-from .tuning import ALLPASS_TYPES, EQ_TYPES, XOVER_TYPES
+from .tuning import ALLPASS_TYPES, EQ_TYPES, XOVER_TYPES, band_in_use
 
 _PALETTE = ("#C58BFF", "#F2A33A", "#5FD0A5", "#FF7A9C", "#6BC7F0", "#D9D35A", "#E8825A", "#9AA8FF")
 LINK_COLOURS: dict[str, str] = {letter: _PALETTE[i % len(_PALETTE)] for i, letter in enumerate(ascii_uppercase)}
@@ -49,15 +49,11 @@ LATENCY_CAVEATS = (
 )
 
 
-def band_in_use(band: EQBandSettings) -> bool:
-    return band.enabled or band.gain_db != 0 or band.type != 0
-
-
 def _channel_id(output: bool, channel: int) -> str:
     return f"{'out' if output else 'in'}:{channel}"
 
 
-def _channel_label(output: bool, channel: int) -> str:
+def channel_label(output: bool, channel: int) -> str:
     if output or channel >= len(ascii_uppercase):
         return f"{'Out' if output else 'In'} {channel + 1}"
     return f"In {ascii_uppercase[channel]}"
@@ -150,7 +146,7 @@ def _group_of(notes: DeviceNotes, output: bool, channel: int) -> LinkGroup | Non
 
 
 def _member(notes: DeviceNotes, output: bool, channel: int) -> dict[str, str]:
-    return {"id": _channel_id(output, channel), "label": _channel_label(output, channel),
+    return {"id": _channel_id(output, channel), "label": channel_label(output, channel),
             "nickname": notes.nicknames.get((output, channel), "")}
 
 
@@ -281,7 +277,7 @@ def _latency(settings: DeviceSettings, selected: tuple[bool, int], name: str) ->
     """The selected channel's latency readout, from the draft: the channel's name (nickname or label), a short text
     to follow it and a line-by-line breakdown."""
     output, index = selected
-    own, lines, exact = _stage(_channel_of(settings, selected), _channel_label(output, index))
+    own, lines, exact = _stage(_channel_of(settings, selected), channel_label(output, index))
     if not output:
         low, high = path_latency(own, None)
         lines.append(f"The {BASE_LATENCY_MS:.3f} ms base latency and the output's delay and FIR come on top; "
@@ -291,7 +287,7 @@ def _latency(settings: DeviceSettings, selected: tuple[bool, int], name: str) ->
     routed: list[Stage] = []
     for i, row in enumerate(settings.mix_matrix):
         if row[index]:
-            stage, part, known = _stage(settings.inputs[i], _channel_label(False, i))
+            stage, part, known = _stage(settings.inputs[i], channel_label(False, i))
             routed.append(stage)
             lines += part
             exact = exact and known
@@ -310,7 +306,7 @@ def _channel_entry(view: ServiceView, notes: DeviceNotes, output: bool, index: i
                    pending_keys: set[ControlKey]) -> dict[str, Any]:
     ch = _channel_of(view.draft, (output, index))
     group = _group_of(notes, output, index)
-    return {"id": _channel_id(output, index), "label": _channel_label(output, index),
+    return {"id": _channel_id(output, index), "label": channel_label(output, index),
             "nickname": notes.nicknames.get((output, index), ""), "gain_db": ch.base.gain_db,
             "delay_ms": ch.base.delay_ms, "muted": ch.base.muted, "inverted": ch.base.inverted,
             "delay_pending": ControlKey(output, index, "delay") in pending_keys,
@@ -329,11 +325,11 @@ def _selected_entry(view: ServiceView, notes: DeviceNotes, selected: tuple[bool,
     if group is not None:
         link = {"letter": group.letter, "members": [_member(notes, output, m) for m in group.members],
                 "sections": {s: s in group.sections for s in _link_section_names(draft)}}
-    return {"id": _channel_id(output, index), "label": _channel_label(output, index),
+    return {"id": _channel_id(output, index), "label": channel_label(output, index),
             "nickname": notes.nicknames.get(selected, ""), "eq_slots": len(draft.eq_bands),
             "eq_used": sum(band_in_use(b) for b in draft.eq_bands), "link": link,
             "filters": _filter_cards(draft, baseline, pending_keys), "more": _more_rows(draft),
-            "latency": _latency(view.draft, selected, notes.nicknames.get(selected) or _channel_label(output, index))}
+            "latency": _latency(view.draft, selected, notes.nicknames.get(selected) or channel_label(output, index))}
 
 
 def _mixer(view: ServiceView, notes: DeviceNotes, pending_keys: set[ControlKey]) -> dict[str, Any]:

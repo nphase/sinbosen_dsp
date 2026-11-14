@@ -1221,3 +1221,156 @@ def test_a_staged_route_updates_the_tune_latency(studio: Studio) -> None:
         _route(studio, "In C to Out 3, not connected").click()
     studio.page.get_by_role("button", name="Tune", exact=True).click()
     latency.get_by_text("latency 2.73 ms").wait_for()
+
+
+# Import from REW
+
+REW_FIXTURE = Path(__file__).parents[1] / "fixtures" / "rew_filters.txt"
+
+
+def _api(studio: Studio, path: str, body: dict[str, Any]) -> None:
+    studio.page.evaluate("([path, body]) => fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'},"
+                         " body: JSON.stringify(body)})", [path, body])
+
+
+def _choose_rew_file(studio: Studio, path: Path) -> Any:
+    page = studio.page
+    with page.expect_file_chooser() as chooser:
+        page.get_by_role("button", name="Import from REW…", exact=True).click()
+    chooser.value.set_files(path)
+    dialog = page.get_by_role("dialog", name="Import REW filters")
+    dialog.wait_for()
+    return dialog
+
+
+def _out3_with_bands_and_a_high_pass(studio: Studio) -> None:
+    """Out 3 with 6 bands in use and a 80 Hz Linkwitz-Riley 24 dB/oct high-pass, all applied."""
+    for _ in range(6):
+        _api(studio, "/api/band/add", {"id": "out:2"})
+    _api(studio, "/api/edit", {"id": "out:2", "kind": "hp", "values": {
+        "freq_hz": 80, "filter_type": 1, "slope_db_per_oct": 24, "enabled": True}})
+    _api(studio, "/api/apply", {})
+    studio.select("Out 3")
+    studio.page.locator("#cards .card-title").get_by_text("EQ 6", exact=True).wait_for()
+
+
+def test_the_import_dialog_says_exactly_what_it_overrides(studio: Studio, tmp_path: Path) -> None:
+    _out3_with_bands_and_a_high_pass(studio)
+    studio.name("Out 3", "Mid L")
+    dialog = _choose_rew_file(studio, REW_FIXTURE)
+    assert dialog.locator(".popover-title").inner_text() == 'Import REW filters into Out 3 "Mid L"'
+    warning = dialog.locator(".rew-warning").first
+    assert warning.inner_text().splitlines() == [
+        "This overrides the channel's current settings.",
+        "This replaces all EQ on this channel. 6 bands now in use will be overwritten or cleared.",
+        "The high-pass (now 80 Hz Linkwitz-Riley 24 dB/oct) will be replaced by 100 Hz Butterworth 12 dB/oct.",
+        "The low-pass is kept: the file has none."]
+    assert warning.evaluate("el => getComputedStyle(el).borderTopColor") == PENDING_BORDER
+    rows = [row.split("\t") for row in dialog.locator(".rew-table tbody tr").all_inner_texts()]
+    assert [row[:5] for row in rows[:2]] == [["1", "Parametric EQ", "50", "-6.0", "3.69"],
+                                             ["2", "Parametric EQ", "1911", "-3.1", "1.20"]]
+    assert "REW Q 2.58" in rows[0][5]
+    assert rows[2][:2] == ["HP", "100 Hz Butterworth 12 dB/oct (Filter 4 (HP))"]
+    skipped = dialog.locator(".rew-skipped")
+    assert skipped.get_by_text("Not imported", exact=True).count() == 1
+    assert skipped.locator("li").count() == 1 and skipped.locator("li").inner_text().startswith("Filter 5 (LS): ")
+    dialog.get_by_text("Nothing is sent to the unit until you press Apply.", exact=True).wait_for()
+    cancel = dialog.get_by_role("button", name="Cancel", exact=True)
+    assert cancel.evaluate("el => el === document.activeElement")
+    assert dialog.get_by_role("button", name="Replace EQ and crossover", exact=True).is_enabled()
+    hosts = {urlsplit(url).hostname for url in studio.requests}
+    assert hosts == {"127.0.0.1"}, studio.requests
+
+
+def test_cancel_and_escape_stage_nothing_and_enter_does_not_replace(studio: Studio) -> None:
+    studio.select("Out 3")
+    page = studio.page
+    stagings: list[str] = []
+    page.on("request", lambda request: stagings.append(request.url) if request.url.endswith("/api/rew/import")
+            else None)
+    dialog = _choose_rew_file(studio, REW_FIXTURE)
+    # Cancel has the focus, so Enter cancels.
+    page.keyboard.press("Enter")
+    dialog.wait_for(state="detached")
+    dialog = _choose_rew_file(studio, REW_FIXTURE)
+    page.keyboard.press("Escape")
+    dialog.wait_for(state="detached")
+    button = page.get_by_role("button", name="Import from REW…", exact=True)
+    assert button.evaluate("el => el === document.activeElement")
+    page.wait_for_timeout(200)
+    assert stagings == [] and studio.unapplied().inner_text() == ""
+    assert studio.server_state()["status"]["pending_count"] == 0
+
+
+def test_replace_stages_the_bands_as_unapplied_cards_and_revert_clears_them(studio: Studio) -> None:
+    page = studio.page
+    studio.select("Out 3")
+    dialog = _choose_rew_file(studio, REW_FIXTURE)
+    dialog.get_by_text("No EQ bands are in use now.", exact=False).wait_for()
+    with page.expect_response("**/api/rew/import"):
+        dialog.get_by_role("button", name="Replace EQ and crossover", exact=True).click()
+    dialog.wait_for(state="detached")
+    studio.unapplied().get_by_text("3 unapplied", exact=True).wait_for()
+    cards = page.locator("#cards .card")
+    assert cards.locator(".card-title").all_inner_texts() == ["High-pass", "Low-pass", "EQ 1", "EQ 2"]
+    assert all("pending" in (card.get_attribute("class") or "")
+               for card in (cards.nth(0), cards.nth(2), cards.nth(3)))
+    assert "pending" not in (cards.nth(1).get_attribute("class") or "")
+    assert studio.field("High-pass frequency").input_value() == "100"
+    page.get_by_role("button", name="Revert", exact=True).click()
+    studio.unapplied().get_by_text("3 unapplied", exact=True).wait_for(state="detached")
+    assert page.locator("#cards .card-title").all_inner_texts() == ["High-pass", "Low-pass"]
+    assert studio.field("High-pass frequency").input_value() == "20"
+
+
+def test_the_same_file_can_be_chosen_twice_in_a_row(studio: Studio) -> None:
+    studio.select("Out 3")
+    for _ in range(2):
+        dialog = _choose_rew_file(studio, REW_FIXTURE)
+        dialog.get_by_role("button", name="Cancel", exact=True).click()
+        dialog.wait_for(state="detached")
+
+
+def test_a_pk_only_file_on_an_input_offers_replace_eq_and_says_nothing_of_the_crossover(
+        studio: Studio, tmp_path: Path) -> None:
+    source = tmp_path / "pk.txt"
+    source.write_text("Equaliser: Generic\nFilter  1: ON  PK       Fc    1000 Hz  Gain  -3.0 dB  Q  2.00\n")
+    studio.select("In A")
+    dialog = _choose_rew_file(studio, source)
+    assert dialog.locator(".popover-title").inner_text() == "Import REW filters into In A"
+    assert "high-pass" not in dialog.inner_text() and "low-pass" not in dialog.inner_text()
+    assert dialog.get_by_role("button", name="Replace EQ", exact=True).is_enabled()
+
+
+def test_a_file_that_is_not_a_rew_export_shows_the_error_with_only_close(studio: Studio, tmp_path: Path) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_text("measurements, not filters\n")
+    studio.select("Out 3")
+    dialog = _choose_rew_file(studio, source)
+    dialog.get_by_text("no filter lines found", exact=False).wait_for()
+    assert [b.inner_text() for b in dialog.get_by_role("button").all()] == ["Close"]
+    dialog.get_by_role("button", name="Close", exact=True).click()
+    dialog.wait_for(state="detached")
+    assert studio.unapplied().inner_text() == ""
+    studio.errors[:] = [e for e in studio.errors if "status of 400" not in e]
+
+
+def test_the_dialog_names_linked_channels_that_will_change(studio: Studio) -> None:
+    studio.select("Out 3")
+    _api(studio, "/api/link", {"id": "out:2", "letter": None})
+    _api(studio, "/api/link", {"id": "out:3", "letter": "A"})
+    studio.page.locator(".link-summary").wait_for()
+    studio.name("Out 4", "Mid R")
+    studio.select("Out 3")
+    dialog = _choose_rew_file(studio, REW_FIXTURE)
+    dialog.get_by_text('Out 4 "Mid R" is linked and will change too.', exact=True).wait_for()
+
+
+def test_with_live_on_the_dialog_says_it_will_be_sent_straight_away(connected_studio: Studio) -> None:
+    page = connected_studio.page
+    page.get_by_role("checkbox", name="Live").check()
+    connected_studio.select("Out 3")
+    dialog = _choose_rew_file(connected_studio, REW_FIXTURE)
+    dialog.get_by_text("Live is on: this will be sent to the unit straight away.", exact=True).wait_for()
+    assert dialog.get_by_text("until you press Apply", exact=False).count() == 0
+    dialog.get_by_role("button", name="Cancel", exact=True).click()

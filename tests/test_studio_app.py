@@ -833,3 +833,180 @@ def test_with_live_on_a_route_is_staged_then_sent_by_live(store: StudioStore) ->
     device.client.set_mix_route.assert_called_once_with(0, 2, True)
     assert state["mixer"]["cells"][0][2] == {"on": True, "pending": False}
     assert state["status"]["live_errors"] == ""
+
+
+# Import from REW
+
+REW_PK = """Equaliser: Generic
+Filter  1: ON  PK       Fc    50.4 Hz  Gain  -6.0 dB  Q  2.58
+Filter  2: ON  PK       Fc    1911 Hz  Gain  -3.1 dB  Q  1.00
+Filter  3: OFF PK       Fc     352 Hz  Gain  -2.9 dB  Q  2.98
+Filter  4: ON  None
+"""
+REW_HP = REW_PK + "Filter  5: ON  HP       Fc     100 Hz\n"
+
+
+def rew_post(client: TestClient, path: str, text: Any, channel_id: Any = "out:2") -> Any:
+    return client.post(path, json={"channel": channel_id, "text": text})
+
+
+def card(state: dict[str, Any], key: str) -> dict[str, Any]:
+    return next(c for c in state["selected"]["filters"] if c["key"] == key)
+
+
+def in_use_cards(state: dict[str, Any]) -> list[str]:
+    return [c["key"] for c in state["selected"]["filters"] if c["kind"] == "eq" and (
+        c["enabled"] or next(f for f in c["fields"] if f["key"] == "gain_db")["value"] != 0)]
+
+
+def test_rew_preview_stages_nothing_and_describes_the_import(client: TestClient) -> None:
+    before = client.get("/api/state").json()["status"]["pending_count"]
+    response = rew_post(client, "/api/rew/preview", REW_HP)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"]["pending_count"] == before == 0
+    rew = body["rew"]
+    first = rew["bands"][0]
+    assert (first["n"], first["source"], first["freq_hz"], first["gain_db"]) == (1, "Filter 1 (PK)", 50, -6.0)
+    # The card shows the stored Q; the note says what REW wrote.
+    assert first["q"] == pytest.approx(2.58 * 10 ** (6.0 / 40), abs=0.1)
+    assert first["type"] == "Parametric EQ"
+    assert any("REW Q 2.58" in note for note in first["notes"])
+    assert [b["n"] for b in rew["bands"]] == [1, 2]
+    assert rew["high_pass"] == {"source": "Filter 5 (HP)", "summary": "100 Hz Butterworth 12 dB/oct"}
+    assert rew["low_pass"] is None
+    assert rew["unsupported"] == []
+    assert rew["skipped"] == 2
+    assert rew["linked"] == []
+    assert rew["nothing_to_import"] is False
+
+
+def test_rew_preview_reports_what_it_replaces(client: TestClient) -> None:
+    post(client, "/api/select", id="out:2")
+    post(client, "/api/band/add", id="out:2")
+    post(client, "/api/band/add", id="out:2")
+    post(client, "/api/edit", id="out:2", kind="hp", values={"freq_hz": 80, "filter_type": 1,
+                                                              "slope_db_per_oct": 24, "enabled": True})
+    pending = client.get("/api/state").json()["status"]["pending_count"]
+    rew = rew_post(client, "/api/rew/preview", REW_HP).json()["rew"]
+    assert rew["replaces"] == {"eq_in_use": 2, "high_pass": "80 Hz Linkwitz-Riley 24 dB/oct", "low_pass": None}
+    # A file with no HP does not say it replaces one.
+    rew = rew_post(client, "/api/rew/preview", REW_PK).json()["rew"]
+    assert rew["replaces"] == {"eq_in_use": 2, "high_pass": None, "low_pass": None}
+    assert client.get("/api/state").json()["status"]["pending_count"] == pending
+
+
+def test_rew_preview_lists_unsupported_filters_and_flags_an_empty_import(client: TestClient) -> None:
+    text = "Filter  1: ON  LS       Fc     120 Hz  Gain   3.0 dB\nFilter  2: ON  HP       Fc     50 Hz\n" \
+           "Filter  3: ON  HP1      Fc     40 Hz\n"
+    rew = rew_post(client, "/api/rew/preview", text, "in:0").json()["rew"]
+    assert [u["source"] for u in rew["unsupported"]] == ["Filter 1 (LS)", "Filter 2 (HP)", "Filter 3 (HP1)"]
+    assert "no crossover" in rew["unsupported"][1]["reason"]
+    assert rew["nothing_to_import"] is True
+
+
+def test_rew_import_stages_eq_only_for_a_pk_only_file(client: TestClient) -> None:
+    state = rew_post(client, "/api/rew/import", REW_PK).json()
+    assert state["result"] is None
+    assert state["status"]["pending_count"] == 2
+    post(client, "/api/select", id="out:2")
+    state = client.get("/api/state").json()
+    assert [c["key"] for c in state["selected"]["filters"] if c["pending"]] == ["eq:0", "eq:1"]
+    assert card(state, "hp")["pending"] is False and card(state, "lp")["pending"] is False
+    assert in_use_cards(state) == ["eq:0", "eq:1"]
+    assert post(client, "/api/revert")["status"]["pending_count"] == 0
+
+
+def test_rew_import_with_a_high_pass_replaces_it_and_leaves_the_low_pass(client: TestClient) -> None:
+    post(client, "/api/select", id="out:2")
+    post(client, "/api/edit", id="out:2", kind="lp", values={"freq_hz": 3000, "enabled": True})
+    post(client, "/api/apply")
+    state = rew_post(client, "/api/rew/import", REW_HP).json()
+    hp, lp = card(state, "hp"), card(state, "lp")
+    assert hp["pending"] is True and hp["enabled"] is True
+    assert {f["key"]: f["value"] for f in hp["fields"]} == {"freq_hz": 100, "filter_type": 0, "slope_db_per_oct": 12}
+    assert lp["pending"] is False and lp["enabled"] is True
+    assert next(f for f in lp["fields"] if f["key"] == "freq_hz")["value"] == 3000
+
+
+def test_rew_import_resets_in_use_bands_the_file_does_not_use(client: TestClient) -> None:
+    post(client, "/api/select", id="out:2")
+    for _ in range(4):
+        post(client, "/api/band/add", id="out:2")
+    post(client, "/api/edit", id="out:2", kind="eq", index=3, values={"gain_db": 4.0, "type": 2})
+    post(client, "/api/apply")
+    state = rew_post(client, "/api/rew/import", REW_PK).json()
+    # Bands 3 and 4 are reset (off, flat), so their cards are gone; bands 1 and 2 take the file's filters.
+    assert state["status"]["pending_count"] == 4
+    assert in_use_cards(state) == ["eq:0", "eq:1"]
+    assert state["selected"]["eq_used"] == 2
+
+
+def test_rew_import_changes_a_linked_member_the_same_way(client: TestClient) -> None:
+    post(client, "/api/link", id="out:2", letter=None)
+    post(client, "/api/link", id="out:3", letter="A")
+    rew = rew_post(client, "/api/rew/preview", REW_HP).json()["rew"]
+    assert rew["linked"] == ["Out 4"]
+    state = rew_post(client, "/api/rew/import", REW_HP).json()
+    assert state["status"]["pending_count"] == 6
+    state = post(client, "/api/select", id="out:3")
+    assert in_use_cards(state) == ["eq:0", "eq:1"]
+    assert card(state, "hp")["pending"] is True
+
+
+def test_rew_linked_lists_only_members_that_a_tied_section_changes(client: TestClient) -> None:
+    post(client, "/api/link", id="out:2", letter=None)
+    post(client, "/api/link", id="out:3", letter="A")
+    post(client, "/api/link/sections", letter="A", sections=["crossover"])
+    # The group ties only the crossover, so an EQ-only file changes nobody else...
+    assert rew_post(client, "/api/rew/preview", REW_PK).json()["rew"]["linked"] == []
+    # ...and a file with an HP changes the member through the crossover.
+    assert rew_post(client, "/api/rew/preview", REW_HP).json()["rew"]["linked"] == ["Out 4"]
+
+
+def test_rew_import_on_an_input_imports_the_eq_and_not_the_high_pass(client: TestClient) -> None:
+    state = rew_post(client, "/api/rew/import", REW_HP, "in:0").json()
+    assert state["status"]["pending_count"] == 2
+    post(client, "/api/select", id="in:0")
+    assert [c["key"] for c in client.get("/api/state").json()["selected"]["filters"]
+            if c["kind"] == "eq" and c["pending"]] == ["eq:0", "eq:1"]
+
+
+@pytest.mark.parametrize("path", ["/api/rew/preview", "/api/rew/import"])
+@pytest.mark.parametrize(("text", "channel_id", "message"), [
+    ("not a REW file", "out:2", "no filter lines"),
+    ("Equaliser: DSP1124P\nFilter  1: ON  PK       Fc     100 Hz  Gain  -3.0 dB  Q  2\n", "out:2", "Generic"),
+    ("".join(f"Filter {i:2d}: ON  PK       Fc     {100 * i} Hz  Gain  -3.0 dB  Q  2.000\n" for i in range(1, 9)),
+     "in:0", "7 EQ bands"),
+    ("Filter  1: ON  PK       Fc     100 Hz  Gain  -3.0 dB  Q  2.000\n" + "x" * 262144, "out:2", "256 kB"),
+    (None, "out:2", "text must be a string"),
+    (12, "out:2", "text must be a string"),
+    (REW_PK, "out:99", "out of range"),
+    (REW_PK, "elsewhere", "id must look like"),
+    (REW_PK, None, "id must look like"),
+])
+def test_rew_errors_are_400_with_the_message_and_stage_nothing(client: TestClient, path: str, text: Any,
+                                                                channel_id: Any, message: str) -> None:
+    response = client.post(path, json={"channel": channel_id, "text": text})
+    assert response.status_code == 400, response.text
+    assert message in response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def test_rew_import_of_a_file_with_nothing_importable_is_400_and_stages_nothing(client: TestClient) -> None:
+    text = ("Filter  1: ON  LS       Fc     120 Hz  Gain   3.0 dB\n"
+            "Filter  2: OFF PK       Fc     100 Hz  Gain  -3 dB  Q  2\n")
+    response = rew_post(client, "/api/rew/import", text)
+    assert response.status_code == 400
+    assert "nothing in this file can be imported" in response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def test_rew_import_is_a_draft_even_with_live_off_and_never_an_immediate_write(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        state = rew_post(client, "/api/rew/import", REW_HP).json()
+        assert state["status"]["pending_count"] == 3
+        assert device.writes == []
+    device.client.set_eq_band.assert_not_called()
+    device.client.set_xover.assert_not_called()

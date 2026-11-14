@@ -10,11 +10,11 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import discovery, usb
+from . import codecs, discovery, rew, usb
 from .blobdiff import diff_blobs
 from .client import Client
 from .service import ControlKey, FIRRestoreError, controls, restore_fir_coefficients, validated_fir_coefficients
-from .settings import decode_settings
+from .settings import DA0408X, decode_settings
 
 
 def _write_atomic(path: str, data: bytes) -> None:
@@ -165,6 +165,75 @@ def _cmd_set_eq_band(args: argparse.Namespace) -> int:
             output=args.output,
         )
         return _finish_write(client, args, ControlKey(args.output, args.channel, "eq", args.band_index))
+
+
+def _describe_band(index: int, mapped: rew.MappedBand) -> str:
+    band = mapped.band
+    kind = "allpass" if band.type == 4 else "peaking"
+    text = (f"{mapped.source.label} -> band {index + 1}: {kind} {band.freq_hz} Hz, "
+            f"{band.gain_db:+.1f} dB, stored Q {band.q:.3f}")
+    return text + (f"  ({'; '.join(mapped.notes)})" if mapped.notes else "")
+
+
+def _cmd_import_rew(args: argparse.Namespace) -> int:
+    kind = "output" if args.output else "input"
+    count = DA0408X.output_count if args.output else DA0408X.input_count
+    band_count = DA0408X.output_eq_bands if args.output else DA0408X.input_eq_bands
+    try:
+        if not 0 <= args.channel < count:
+            raise ValueError(f"{kind} channel must be 0-{count - 1}, got {args.channel}")
+        data = Path(args.file).read_bytes()
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("latin-1")
+        mapping = rew.map_filters(
+            rew.parse(text), band_count=band_count,
+            crossover_unavailable="import-rew sets EQ bands only; set the crossover with set-xover")
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}; no packet was sent", file=sys.stderr)
+        return 2
+    if mapping.unsupported and not args.skip_unsupported:
+        for item in mapping.unsupported:
+            print(f"error: {item.source.label}: {item.reason}", file=sys.stderr)
+        print("no packet was sent; pass --skip-unsupported to import the other filters", file=sys.stderr)
+        return 2
+    for index, mapped in enumerate(mapping.bands):
+        print(_describe_band(index, mapped))
+    for item in mapping.unsupported:
+        print(f"skipped {item.source.label}: {item.reason}")
+    unused = f"bands {len(mapping.bands) + 1}-{band_count}" if len(mapping.bands) < band_count else "no other bands"
+    if args.dry_run:
+        print(f"dry run: no packet was sent; {unused} of {kind} {args.channel} would be disabled if enabled")
+        return 0
+    with Client(args.ip) as client:
+        plan = rew.plan_bands(client.read_settings(), mapping, output=args.output, channel=args.channel)
+        for key, band in plan.items():
+            client.set_eq_band(args.channel, key.index, freq_hz=band.freq_hz, gain_db=band.gain_db, q=band.q,
+                               type=band.type, slope=band.slope, enabled=band.enabled, output=args.output)
+        disabled = sum(1 for band in plan.values() if not band.enabled)
+        print(f"{len(plan)} EQ band writes sent to {kind} {args.channel} ({disabled} to disable unused bands)")
+        if not args.verify:
+            print("acknowledged by device (not verified; pass --verify to read back)")
+            return 0
+        stored = controls(client.read_settings())
+        wanted = {ControlKey(args.output, args.channel, "eq", i): m.band for i, m in enumerate(mapping.bands)} | plan
+        failed = False
+        for key, band in wanted.items():
+            sent = codecs.eq_struct.encode((band.freq_hz, band.gain_db, band.q, band.slope, band.type, band.enabled))
+            if getattr(stored[key], "raw", None) != sent:
+                print(f"error: readback of {key.label} does not match the import (stored {stored[key]!r})",
+                      file=sys.stderr)
+                failed = True
+        for index in range(len(mapping.bands), band_count):
+            key = ControlKey(args.output, args.channel, "eq", index)
+            if getattr(stored[key], "enabled", False):
+                print(f"error: readback of {key.label} does not match the import (still enabled)", file=sys.stderr)
+                failed = True
+        if failed:
+            return 1
+        print(f"verified: readback of {kind} {args.channel}'s {band_count} EQ bands matches the import")
+        return 0
 
 
 def _cmd_eq_bypass(args: argparse.Namespace) -> int:
@@ -470,6 +539,23 @@ def build_parser() -> argparse.ArgumentParser:
     eq_enable.add_argument("--disable", dest="enabled", action="store_false")
     p_eq.add_argument("--output", action="store_true", help="target an output channel (default: input)")
     p_eq.set_defaults(func=_cmd_set_eq_band)
+
+    p_rew = sub.add_parser(
+        "import-rew",
+        help="Replace a channel's EQ with the filters in a REW 'Export filter settings as text' file",
+    )
+    p_rew.add_argument("ip", help=_ADDRESS_HELP)
+    p_rew.add_argument("channel", type=int)
+    p_rew.add_argument("file", help="REW filter settings text export (Generic equaliser)")
+    p_rew.add_argument("--output", action="store_true", help="target an output channel (default: input)")
+    p_rew.add_argument("--dry-run", action="store_true", help="print the band mapping and send nothing")
+    p_rew.add_argument(
+        "--skip-unsupported",
+        action="store_true",
+        help="import the other filters when some cannot be reproduced (default: refuse the whole file)",
+    )
+    p_rew.add_argument("--verify", action="store_true", help="read settings back and confirm every EQ band")
+    p_rew.set_defaults(func=_cmd_import_rew)
 
     p_eq_bypass = sub.add_parser(
         "eq-bypass",

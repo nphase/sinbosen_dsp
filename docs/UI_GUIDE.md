@@ -169,8 +169,49 @@ a band disables it and resets it to a 0 dB parametric band, keeping its
 frequency and Q. **Add band** enables the first band not in use and shows
 `n of N used`.
 
+**Import from REW...** on the selected-channel bar is described under "Importing
+REW filters" below.
+
 At the right, a small list shows whether the limiter, the compressor and the FIR
 are on (an input has only the FIR). They cannot be edited here yet.
+
+### Importing REW filters
+
+**Import from REW...** (selected-channel bar, inputs and outputs) loads a Room
+EQ Wizard filter file into the selected channel. In REW use the **Generic**
+equaliser and File > Export > "Export filter settings as text", then choose
+that `.txt` file. The file is read in the browser and sent only to this local
+server. **This overrides the channel's current settings**, and the dialog that
+opens says exactly what:
+
+- **All EQ on the channel is replaced.** The file's filters take bands 1, 2, ...;
+  every other band that is in use is reset (off, 0 dB parametric, frequency and Q
+  kept), as the card's **×** does. The dialog says how many bands in use will be
+  overwritten or cleared.
+- **The high-pass and low-pass are replaced only if the file has them.** REW's
+  `HP`/`LP` (12 dB/oct Butterworth), `HP1`/`LP1` (6 dB/oct Butterworth) and
+  `HPQ`/`LPQ` with Q 0.707 (Butterworth 12 dB/oct) or Q 0.5 (Linkwitz-Riley 12
+  dB/oct) go to the crossover, outputs only. A file with no HP keeps the channel's
+  high-pass exactly as it is; likewise the low-pass. The dialog shows the current
+  setting and what replaces it.
+- **Linked channels change too.** The edits go through the channel's link group
+  like a hand edit, and the dialog names each member that will change.
+- A table shows what will be loaded (band, type, Hz, dB, Q, notes), and **Not
+  imported** lists each filter the device cannot reproduce exactly, with the
+  reason: shelves, notches, other kinds of HP/LP (for example 24 dB/oct or a Q
+  that is neither 0.707 nor 0.5), a second HP or LP, an HP or LP on an input,
+  and values outside the device's range. Nothing is approximated. REW's Q for a
+  peaking filter is converted to the device's stored Q (shown on the band card);
+  that conversion follows the documented model in docs/PROTOCOL.md and has not been
+  checked by measurement on a unit.
+
+Nothing is sent to the unit until you press **Apply**; with **Live** on, the
+dialog says it will be sent straight away. **Cancel** (the default) and Escape
+leave everything as it was. After **Replace EQ** (or **Replace EQ and
+crossover**) the cards and plot show the drafts as unapplied, and **Revert**
+undoes the import. A file that is not a REW export, was made with another
+equaliser, has more filters than the channel has bands (7 on an input, 15 on an
+output) or has nothing importable shows the reason and stages nothing.
 
 ### Latency
 

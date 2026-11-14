@@ -6,6 +6,7 @@ import pytest
 from conftest import FakeTransport
 
 from sinbosen_la548 import cli, codecs
+from sinbosen_la548 import settings as settings_layout
 from sinbosen_la548.client import Client, LockState
 from sinbosen_la548.protocol import Opcode
 from sinbosen_la548.registry import ChannelType
@@ -373,3 +374,119 @@ def test_write_fir_coefs_reports_a_locally_refused_write_as_not_sent(monkeypatch
     assert rc == 1
     assert "no packet was sent" in err
     assert "outcome unknown" not in err
+
+
+REW_FILE = """Equaliser: Generic
+Filter  1: ON  PK       Fc    50.4 Hz  Gain  -6.0 dB  Q  2.58
+Filter  2: ON  PK       Fc    1911 Hz  Gain  -3.1 dB  Q  1.00
+Filter  3: ON  None
+"""
+REW_PAYLOADS = [
+    codecs.eq_struct.encode((50, -6.0, 2.58 * 10 ** (6.0 / 40), 0, 0, True)),
+    codecs.eq_struct.encode((1911, -3.1, 1.0 * 10 ** (3.1 / 40), 0, 0, True)),
+]
+
+
+def _rew_args(tmp_path: Path, text: str, *extra: str) -> argparse.Namespace:
+    source = tmp_path / "filters.txt"
+    source.write_text(text)
+    return cli.build_parser().parse_args(["import-rew", "192.0.2.1", "2", str(source), *extra])
+
+
+def test_import_rew_writes_one_eq_band_per_filter(monkeypatch, tmp_path: Path, capsys):
+    transport = _cli_client(monkeypatch)
+    args = _rew_args(tmp_path, REW_FILE, "--output")
+
+    assert args.func(args) == 0
+
+    writes = [call for call in transport.calls if call[0] == Opcode.WRITE_MODULE_ID]
+    assert [sent for _, sent, _ in writes] == REW_PAYLOADS
+    assert [(h["channel_type"], h["channel_id"], h["module_id"], h["data_id"]) for _, _, h in writes] == [
+        (OUT, 2, 4, 0), (OUT, 2, 5, 0)]
+    out = capsys.readouterr().out
+    assert "Filter 1 (PK)" in out and "band 1" in out
+    assert "acknowledged" in out
+
+
+def test_import_rew_dry_run_prints_the_mapping_and_sends_nothing(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(cli, "Client", lambda ip: pytest.fail("must not construct a client"))
+    args = _rew_args(tmp_path, REW_FILE, "--dry-run")
+
+    assert args.func(args) == 0
+
+    out = capsys.readouterr().out
+    assert "Filter 2 (PK)" in out and "1911 Hz" in out
+    assert "no packet was sent" in out
+
+
+def test_import_rew_refuses_unsupported_filters_before_connecting(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(cli, "Client", lambda ip: pytest.fail("must not construct a client"))
+    args = _rew_args(tmp_path, REW_FILE + "Filter  4: ON  LS       Fc     120 Hz  Gain   3.0 dB\n")
+
+    assert args.func(args) == 2
+
+    err = capsys.readouterr().err
+    assert "Filter 4 (LS)" in err and "no packet was sent" in err
+
+
+def test_import_rew_leaves_the_crossover_to_set_xover(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(cli, "Client", lambda ip: pytest.fail("must not construct a client"))
+    args = _rew_args(tmp_path, REW_FILE + "Filter  4: ON  HP       Fc     100 Hz\n", "--output")
+
+    assert args.func(args) == 2
+
+    err = capsys.readouterr().err
+    assert "Filter 4 (HP)" in err and "set-xover" in err and "no packet was sent" in err
+
+
+def test_import_rew_skip_unsupported_imports_the_rest(monkeypatch, tmp_path: Path, capsys):
+    transport = _cli_client(monkeypatch)
+    args = _rew_args(tmp_path, REW_FILE + "Filter  4: ON  LS       Fc     120 Hz  Gain   3.0 dB\n",
+                     "--skip-unsupported")
+
+    assert args.func(args) == 0
+
+    assert [sent for op, sent, _ in transport.calls if op == Opcode.WRITE_MODULE_ID] == REW_PAYLOADS
+    assert "skipped Filter 4 (LS)" in capsys.readouterr().out
+
+
+def test_import_rew_rejects_too_many_filters_for_an_input_before_connecting(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(cli, "Client", lambda ip: pytest.fail("must not construct a client"))
+    lines = "".join(f"Filter {i:2d}: ON  PK       Fc     {100 * i} Hz  Gain  -3.0 dB  Q  2.000\n" for i in range(1, 9))
+    args = _rew_args(tmp_path, lines)
+
+    assert args.func(args) == 2
+    assert "7 EQ bands" in capsys.readouterr().err
+
+
+def test_import_rew_rejects_an_unreadable_file_before_connecting(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(cli, "Client", lambda ip: pytest.fail("must not construct a client"))
+    args = cli.build_parser().parse_args(["import-rew", "192.0.2.1", "0", str(tmp_path / "missing.txt")])
+
+    assert args.func(args) == 2
+    assert "no packet was sent" in capsys.readouterr().err
+
+
+def test_import_rew_verify_reports_a_readback_mismatch(monkeypatch, tmp_path: Path, capsys):
+    _cli_client(monkeypatch)  # readback stays the fixture, where every EQ band is disabled
+    args = _rew_args(tmp_path, REW_FILE, "--output", "--verify")
+
+    assert args.func(args) == 1
+    assert "does not match" in capsys.readouterr().err
+
+
+def test_import_rew_verify_accepts_a_matching_readback(monkeypatch, tmp_path: Path, capsys):
+    transport = _cli_client(monkeypatch)
+    # A device that already holds the import: nothing to write, readback matches.
+    blob = FIXTURE
+    for index, payload in enumerate(REW_PAYLOADS):
+        # Output channel blocks follow the inputs; EQ bands are 9 bytes from offset 38 (settings.py).
+        start = settings_layout._OUTPUT_START + 2 * settings_layout._OUTPUT_STRIDE + 38 + index * 9
+        blob = blob[:start] + payload + blob[start + len(payload):]
+    assert [b.raw for b in decode_settings(blob).outputs[2].eq_bands[:2]] == REW_PAYLOADS
+    transport.responses[Opcode.READ_GROUP] = blob
+    args = _rew_args(tmp_path, REW_FILE, "--output", "--verify")
+
+    assert args.func(args) == 0
+    assert [op for op, _, _ in transport.calls if op == Opcode.WRITE_MODULE_ID] == []
+    assert "verified" in capsys.readouterr().out

@@ -15,6 +15,15 @@ XOVER_TYPES = {0: "Butterworth", 1: "Linkwitz–Riley", 2: "Bessel"}
 ALLPASS_TYPES = frozenset({3, 4})
 
 
+def band_in_use(band: EQBandSettings) -> bool:
+    return band.enabled or band.gain_db != 0 or band.type != 0
+
+
+def cleared_band(band: EQBandSettings) -> EQBandSettings:
+    """The band as the Tune screen's remove action leaves it: off and flat, with frequency and Q kept."""
+    return replace(band, enabled=False, gain_db=0.0, type=0, slope=0)
+
+
 class TuningController:
     def __init__(self, service: DSPService):
         self.service = service

@@ -480,3 +480,27 @@ select.field option { background: var(--panel); color: var(--text); }
 .route.on { border-color: var(--accent); background: var(--accent); }
 .route.on:hover { background: #6BB4FF; }
 .route.pending { border-color: var(--pending); box-shadow: 0 0 0 1px var(--pending); }
+
+/* Import from REW: a dialog like the Save popover, with a warning block in the same colour as its overwrite step */
+
+.rew-popover { width: 560px; max-width: calc(100vw - 16px); }
+.rew-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--pending);
+  border-radius: 3px;
+  background: rgba(242, 163, 58, 0.08);
+  color: var(--pending);
+  font-size: 12px;
+}
+.rew-table-wrap { max-height: 252px; overflow-y: auto; }
+.rew-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.rew-table th { padding: 2px 6px; color: var(--muted); font-size: 11px; font-weight: 600; text-align: left; }
+.rew-table td { padding: 2px 6px; border-top: 1px solid var(--rule); }
+.rew-table td:nth-child(2) { white-space: nowrap; }
+.rew-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.rew-table .notes { color: var(--muted); }
+.rew-heading { color: var(--muted); font-size: 11px; font-weight: 600; }
+.rew-skipped ul { margin: 2px 0 0; padding-left: 16px; color: var(--text-2); font-size: 12px; }

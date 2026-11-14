@@ -23,17 +23,18 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import links
-from .service import PROGRAM_SLOTS, ApplyResult, ControlKey, DSPService, demo_settings
-from .settings import CrossoverSettings, EQBandSettings
+from . import links, rew
+from .service import PROGRAM_SLOTS, ApplyResult, ControlKey, DSPService, controls, demo_settings, same_value
+from .settings import CrossoverSettings, DeviceSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
-from .studio_view import band_in_use, build_state
-from .tuning import TuningController
+from .studio_view import build_state, channel_label
+from .tuning import EQ_TYPES, TuningController, band_in_use, cleared_band
 
 LOG = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).with_name("web")
 DEMO_DEVICE_KEY = "demo"
 FLUSH_INTERVAL_S = 0.25
+MAX_REW_BYTES = 256 * 1024
 
 Handler = Callable[[dict[str, Any]], ApplyResult | None]
 
@@ -285,9 +286,63 @@ class _Studio:
         bands = (draft.outputs if output else draft.inputs)[channel].eq_bands
         if not 0 <= index < len(bands):
             raise ValueError("EQ band out of range")
-        band = replace(bands[index], enabled=False, gain_db=0.0, type=0, slope=0)
+        band = cleared_band(bands[index])
         key = ControlKey(output, channel, "eq", index)
         self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: band}))
+
+    def _rew_import_plan(self, body: dict[str, Any]) -> tuple[bool, int, rew.Mapping, DeviceSettings]:
+        """The channel (named by `channel`, like `id` elsewhere), the file's mapping onto it and the draft it used."""
+        output, channel = self._channel({"id": body.get("channel")})
+        text = _text(body, "text")
+        if len(text.encode()) > MAX_REW_BYTES:
+            raise ValueError(f"the file is over {MAX_REW_BYTES // 1024} kB; a REW filter export is far smaller")
+        draft = self.service.view(self.token).draft
+        return output, channel, rew.map_for_channel(draft, text, output=output, channel=channel), draft
+
+    def rew_preview(self, body: dict[str, Any]) -> dict[str, Any]:
+        """What importing a REW export would load and overwrite on a channel, with nothing staged."""
+        output, channel, mapping, draft = self._rew_import_plan(body)
+        current = (draft.outputs if output else draft.inputs)[channel]
+        edits = rew.plan(draft, mapping, output=output, channel=channel)
+        available = controls(draft)
+        linked = {key.channel for key, value in links.expand(self._notes().links, draft, edits).items()
+                  if key not in edits and not same_value(value, available[key])}
+
+        def band(index: int, mapped: rew.MappedBand) -> dict[str, Any]:
+            stored, source = mapped.band, mapped.source
+            notes = list(mapped.notes)
+            if stored.type == 0 and stored.gain_db != 0 and source.q is not None:
+                notes.append(f"REW Q {source.q:g}, shown as {stored.q:.2f} on the band card")
+            return {"n": index + 1, "source": source.label, "type": EQ_TYPES[stored.type], "freq_hz": stored.freq_hz,
+                    "gain_db": stored.gain_db, "q": round(stored.q, 3), "notes": notes}
+
+        def crossover(mapped: rew.MappedCrossover | None) -> dict[str, Any] | None:
+            return None if mapped is None else {"source": mapped.source.label,
+                                                "summary": rew.crossover_summary(mapped.block)}
+
+        def replaced(mapped: rew.MappedCrossover | None, name: str) -> str | None:
+            return None if mapped is None else rew.crossover_summary(getattr(current, name))
+
+        return {
+            "bands": [band(i, mapped) for i, mapped in enumerate(mapping.bands)],
+            "high_pass": crossover(mapping.high_pass), "low_pass": crossover(mapping.low_pass),
+            "unsupported": [{"source": u.source.label, "reason": u.reason} for u in mapping.unsupported],
+            "skipped": len(mapping.skipped),
+            "replaces": {"eq_in_use": sum(band_in_use(b) for b in current.eq_bands),
+                         "high_pass": replaced(mapping.high_pass, "hp"), "low_pass": replaced(mapping.low_pass, "lp")},
+            "linked": [channel_label(output, member) for member in sorted(linked)],
+            "nothing_to_import": not (mapping.bands or mapping.high_pass or mapping.low_pass),
+        }
+
+    def rew_import(self, body: dict[str, Any]) -> None:
+        """Stage a REW export as drafts on a channel: its EQ bands, and the HP and LP the file has, through links like
+        any hand edit. Filters the device cannot reproduce are left out."""
+        output, channel, mapping, draft = self._rew_import_plan(body)
+        if not (mapping.bands or mapping.high_pass or mapping.low_pass):
+            reasons = rew.describe_unsupported(mapping)
+            raise ValueError("nothing in this file can be imported" + (f": {reasons}" if reasons else ""))
+        edits = rew.plan(draft, mapping, output=output, channel=channel)
+        self.service.stage_many(self.token, links.expand(self._notes().links, draft, edits))
 
     def route(self, body: dict[str, Any]) -> None:
         """Stage one crossing of the mix matrix. Routing is a draft like any filter edit, never written at once: a
@@ -474,6 +529,19 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
 
         return await run_in_threadpool(respond, save)
 
+    async def rew_preview(request: Request) -> Response:
+        try:
+            body = await read_body(request)
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+
+        def preview() -> dict[str, Any]:
+            with studio.lock:
+                rew_plan = studio.rew_preview(body)
+                return {**studio.state(), "result": None, "rew": rew_plan}
+
+        return await run_in_threadpool(respond, preview)
+
     async def index(request: Request) -> Response:
         return FileResponse(WEB_DIR / "index.html")
 
@@ -509,6 +577,8 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
         post_route("/api/band/add", studio.band_add),
         post_route("/api/band/remove", studio.band_remove),
         post_route("/api/route", studio.route),
+        Route("/api/rew/preview", rew_preview, methods=["POST"]),
+        post_route("/api/rew/import", studio.rew_import),
         post_route("/api/nickname", studio.nickname),
         post_route("/api/link", studio.link),
         post_route("/api/unlink", studio.unlink),

@@ -9,7 +9,8 @@ import pytest
 from sinbosen_la548.fir_adapter import FIRParameters
 from sinbosen_la548.service import ControlKey, DSPService, controls, demo_settings
 from sinbosen_la548.studio_store import SECTIONS, DeviceNotes, LinkGroup
-from sinbosen_la548.studio_view import LINK_COLOURS, Stage, band_in_use, build_state, fir_latency_ms, path_latency
+from sinbosen_la548.studio_view import LINK_COLOURS, Stage, build_state, fir_latency_ms, path_latency
+from sinbosen_la548.tuning import band_in_use
 
 NO_NOTES = DeviceNotes({}, ())
 OUT3 = (True, 2)
