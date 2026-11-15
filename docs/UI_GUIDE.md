@@ -122,7 +122,9 @@ crossover and EQ, and the tick boxes in the selected-channel bar change that.
 While tied, an edit to one of those sections on one member is made on every
 member, as a draft: only the fields you edited (a frequency, an enable tick, a
 gain) are set on the other members, each on its own block, so members that differ
-keep their other values. Actions that set a whole block (Add band, removing a
+keep their other values. A field a member's own block would refuse (a gain on an
+allpass band) is skipped for that member, and a member whose stored values the
+unit would refuse is left as it is and shows as out of sync. Actions that set a whole block (Add band, removing a
 band, REW import, joining and Copy from) set the whole block on every member. Links never tie gain, mute or polarity: each channel's level
 is its own, and joining a group or copying from a member never writes anything
 to the unit at once. A group stored by an earlier version that tied gain keeps
@@ -188,8 +190,9 @@ compressor on a factory unit stores values the unit would refuse (a ratio of 0
 and a threshold of +340 dB); the card shows them as stored, and enabling or
 editing it moves each stored value that is outside its range to the nearest
 allowed one and shows those as unapplied; a factory limiter, which also stores
-a +340 dB threshold, is edited the same way. A limiter write sends the unit's
-unused ratio slot as 0. If the unit's stored bytes for a block cannot be
+a +340 dB threshold, is edited the same way (a limiter that has never been used
+shows a threshold of +20 dB when first enabled, which does not limit: set the
+threshold before Apply). A limiter write sends the unit's unused ratio slot as 0. If the unit's stored bytes for a block cannot be
 preserved by a write (a compressor with a non-zero unused detection byte), its
 card is read-only and says so. A limiter edit follows a link
 group that ties **Limiter**. The compressor is never linked. Neither block is

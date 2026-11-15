@@ -7,6 +7,7 @@ import sys
 import time
 import warnings
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -1388,3 +1389,76 @@ def test_add_and_remove_band_are_whole_block_on_members(client: TestClient) -> N
     post(client, "/api/band/add", id="out:0")  # the first band not in use on Out 1
     added = _band(client, "out:0", 0)
     assert added is not None and _band(client, "out:1", 0) == added
+
+
+# Linked edits carry only what was typed, and never invent values on a channel that is not being edited
+
+def _out_1_limiter_on_at_minus_8_linked_with_the_factory_out_3(client: TestClient) -> None:
+    post(client, "/api/edit", id="out:0", kind="limiter", values={"enabled": True, "threshold_db": -8.0})
+    post(client, "/api/apply")
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:2", letter="A")
+    post(client, "/api/link/sections", letter="A", sections=["limiter"])
+    post(client, "/api/revert")
+
+
+def test_editing_a_factory_limiter_never_moves_a_linked_active_limiters_threshold(client: TestClient) -> None:
+    _out_1_limiter_on_at_minus_8_linked_with_the_factory_out_3(client)
+    state = post(client, "/api/edit", id="out:2", kind="limiter", field="release_time_ms", value=300.0)
+    assert state["status"]["pending_count"] == 2
+    out_1 = _limiter_of(client, "out:0")
+    assert (out_1["enabled"], out_1["threshold_db"], out_1["release_time_ms"]) == (True, -8.0, 300.0)
+    post(client, "/api/revert")
+    post(client, "/api/edit", id="out:2", kind="limiter", field="enabled", value=True)
+    assert _limiter_of(client, "out:0")["threshold_db"] == -8.0
+    assert _limiter_of(client, "out:2")["threshold_db"] == 20.0  # clamped on the channel being edited only
+
+
+def test_a_member_holding_out_of_range_values_is_left_alone_by_a_linked_edit(client: TestClient) -> None:
+    _out_1_limiter_on_at_minus_8_linked_with_the_factory_out_3(client)
+    state = post(client, "/api/edit", id="out:0", kind="limiter", field="release_time_ms", value=300.0)
+    assert state["status"]["pending_count"] == 1
+    assert _limiter_of(client, "out:2")["threshold_db"] == 340.0
+    assert channel(state, "out:2")["link"]["in_sync"] is False
+
+
+def test_a_gain_edit_is_not_set_on_a_members_allpass_band(client: TestClient) -> None:
+    post(client, "/api/edit", id="out:0", kind="eq", index=2, values={"enabled": True})
+    post(client, "/api/edit", id="out:1", kind="eq", index=2, values={"enabled": True, "type": 4})
+    post(client, "/api/apply")
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    post(client, "/api/revert")
+    state = post(client, "/api/edit", id="out:0", kind="eq", index=2, field="gain_db", value=4.0)
+    assert state["status"]["pending_count"] == 1
+    assert _band(client, "out:0", 2)["gain_db"] == 4.0  # type: ignore[index]
+    member = _band(client, "out:1", 2)
+    assert member is not None and (member["type"], member["gain_db"]) == (4, 0.0)
+
+
+def test_retyping_a_bands_current_type_does_not_send_its_slope_to_members(store: StudioStore) -> None:
+    settings = demo_settings()
+    key = ControlKey(True, 1, "eq", 2)
+    band = controls(settings)[key]
+    settings = replace_control(settings, key, replace(band, enabled=True, slope=1))
+    with make_client(DSPService(settings), store) as client:
+        post(client, "/api/edit", id="out:0", kind="eq", index=2, values={"enabled": True})
+        post(client, "/api/apply")
+        post(client, "/api/link", id="out:0", letter=None)
+        post(client, "/api/link", id="out:1", letter="A")
+        post(client, "/api/revert")
+        state = post(client, "/api/edit", id="out:0", kind="eq", index=2, field="type", value=0)
+        assert state["status"]["pending_count"] == 0
+
+
+def test_a_compressor_the_engine_refuses_to_write_is_a_400_with_nothing_staged(store: StudioStore) -> None:
+    settings = demo_settings()
+    key = ControlKey(True, 2, "compressor")
+    compressor = controls(settings)[key]
+    settings = replace_control(settings, key, replace(compressor, raw=compressor.raw[:9] + b"\x05"))
+    with make_client(DSPService(settings), store) as client:
+        response = client.post("/api/edit", json={"id": "out:2", "kind": "compressor", "field": "enabled",
+                                                  "value": True})
+        assert response.status_code == 400
+        assert "unused dynamics bytes" in response.json()["error"]
+        assert client.get("/api/state").json()["status"]["pending_count"] == 0

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import fields, is_dataclass, replace
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from string import ascii_uppercase
 from typing import Any
 
-from .service import ControlKey, controls, same_value
+from .service import ControlKey, controls, normalize_control, same_value
 from .settings import DeviceSettings
 from .studio_store import SECTIONS, LinkGroup
 
@@ -44,27 +44,33 @@ def expand(groups: Sequence[LinkGroup], settings: DeviceSettings,
     return result
 
 
-def changed_fields(before: object, after: object, typed: Sequence[str]) -> dict[str, Any] | None:
-    """The fields an edit set, with the values it gave them: the ones the user typed, and any other that the edit
-    moved on the edited block (a type change that resets a slope). None for a single value such as a delay."""
-    if not is_dataclass(after):
-        return None
-    names = {*typed, *(f.name for f in fields(after) if getattr(after, f.name) != getattr(before, f.name))}
-    return {name: getattr(after, name) for name in names if name != "raw"}
-
-
 def expand_fields(groups: Sequence[LinkGroup], settings: DeviceSettings, key: ControlKey, after: object,
-                  updates: dict[str, Any] | None) -> dict[ControlKey, object]:
-    """The edit of `key` as it reaches every other member of a group tying its section: only the `updates` fields,
-    set on the member's own current block at the same key (`after` itself for a single value). Members that differ
-    keep their other fields."""
+                  updates: dict[str, Any] | None,
+                  accept: Callable[[ControlKey, dict[str, Any]], dict[str, Any]] = lambda key, fields: fields,
+                  ) -> dict[ControlKey, object]:
+    """The edit of `key` as it reaches every other member of a group tying its section: only the `updates` fields
+    (those the user typed), set on the member's own current block at the same key; `after` itself for a single value
+    such as a delay. `accept` may drop fields a member's own block would refuse. Members that differ keep their other
+    fields, and a member whose block could not be encoded with the fields set is left out."""
     group = tied_group(groups, key)
     if group is None:
         return {}
     available: dict[ControlKey, Any] = controls(settings)
-    targets = {m: replace(key, channel=m) for m in group.members if m != key.channel}
-    return {target: after if updates is None else replace(available[target], **updates)
-            for target in targets.values() if target in available}
+    result: dict[ControlKey, object] = {}
+    for member in (m for m in group.members if m != key.channel):
+        target = replace(key, channel=member)
+        if target not in available:
+            continue
+        if updates is None:
+            result[target] = after
+            continue
+        value = replace(available[target], **accept(target, updates))
+        try:
+            normalize_control(target, value)
+        except ValueError:
+            continue
+        result[target] = value
+    return result
 
 
 def tied_group(groups: Sequence[LinkGroup], key: ControlKey) -> LinkGroup | None:

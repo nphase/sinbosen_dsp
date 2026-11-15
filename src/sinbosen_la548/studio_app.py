@@ -8,7 +8,7 @@ import logging
 import math
 import threading
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import fields, replace
+from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -33,16 +33,17 @@ from .service import (
     demo_settings,
     same_value,
 )
-from .settings import CompressorSettings, CrossoverSettings, DeviceSettings, EQBandSettings, LimiterSettings
+from .settings import CrossoverSettings, DeviceSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import build_state, channel_label
-from .tuning import ALLPASS_TYPES, EQ_TYPES, TuningController, band_in_use, clamp_dynamics, cleared_band
+from .tuning import ALLPASS_TYPES, EQ_TYPES, TuningController, band_in_use, cleared_band
 
 LOG = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).with_name("web")
 DEMO_DEVICE_KEY = "demo"
 FLUSH_INTERVAL_S = 0.25
 MAX_REW_BYTES = 256 * 1024
+EQ_FIELDS = frozenset({"freq_hz", "gain_db", "q", "type", "enabled"})  # what `TuningController.eq_edit` takes
 
 Handler = Callable[[dict[str, Any]], ApplyResult | None]
 
@@ -273,25 +274,39 @@ class _Studio:
                 if getattr(edited, f.name) != getattr(current, f.name)})
         assert key is not None
         typed = list(values)
-        if kind == "eq" and "type" in values:
+        stored: Any = controls(self.service.view(self.token).draft)[key]
+        if kind == "eq" and block.type != stored.type:
             # A type change also resets the slope, and pins an allpass band's gain: the member gets those too.
             typed += ["slope"] + (["gain_db"] if block.type in ALLPASS_TYPES else [])
         self._stage_edit(key, block, typed)
 
     def _stage_edit(self, key: ControlKey, after: object, typed: Sequence[str]) -> None:
-        """Stage an edit of one block (or delay) of a channel and, through links, the same fields of it on every tied
-        member, applied to each member's own block. An edit that changes nothing on the channel stages nothing there,
-        so unticking a disabled factory block (whose stored values the unit would refuse) is a no-op."""
+        """Stage an edit of one block (or delay) of a channel and, through links, the fields the user typed on every
+        tied member, applied to each member's own block. Values the edit moved on its own channel (a clamped
+        threshold) do not travel. An edit that changes nothing on the channel stages nothing there, so unticking a
+        disabled factory block (whose stored values the unit would refuse) is a no-op."""
         draft = self.service.view(self.token).draft
         before = controls(draft)[key]
-        updates = links.changed_fields(before, after, typed)
+        updates = None if not is_dataclass(after) else {name: getattr(after, name) for name in typed}
         edits: dict[ControlKey, object] = {} if same_value(before, after) else {key: after}
-        for target, value in links.expand_fields(self._notes().links, draft, key, after, updates).items():
-            if isinstance(value, (LimiterSettings, CompressorSettings)) and updates is not None:
-                value = clamp_dynamics(key.block, value, keep=set(updates))
-            edits[target] = value
+        edits.update(links.expand_fields(self._notes().links, draft, key, after, updates, self._member_accepts))
         if edits:
             self.service.stage_many(self.token, edits)
+
+    def _member_accepts(self, key: ControlKey, updates: dict[str, Any]) -> dict[str, Any]:
+        """The fields of a linked edit the member's own block takes: one its direct edit would refuse (a gain on an
+        allpass band) is left out for that member."""
+        if key.block != "eq":
+            return updates
+        kept = {}
+        for name, value in updates.items():
+            if name in EQ_FIELDS:
+                try:
+                    self.tuning.eq_edit(self.token, key.output, key.channel, key.index, name, value)
+                except ValueError:
+                    continue
+            kept[name] = value
+        return kept
 
     @staticmethod
     def _field_value(field: str, value: object) -> object:
