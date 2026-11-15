@@ -200,7 +200,8 @@ response plot, and filter cards for the selected channel, which is Out 1 when
 the page opens. Gain, polarity and mute are written at once (a typed gain when
 you press Enter); everything else is a draft until **Apply**, unless **Live** is
 on. Channels can be linked so edits to crossover, EQ, delay or limiter settings
-apply to every member; links never tie gain, mute or polarity. On the plot, EQ
+apply to every member (only the fields you edit are copied, onto each member's own
+block); links never tie gain, mute or polarity. On the plot, EQ
 bands and crossovers can be dragged (up and down is gain for a band and slope
 for a crossover) and the wheel over a handle changes Q. The top bar shows an
 estimate of the selected channel's latency, computed from the draft and the

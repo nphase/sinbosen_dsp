@@ -33,10 +33,10 @@ from .service import (
     demo_settings,
     same_value,
 )
-from .settings import CrossoverSettings, DeviceSettings, EQBandSettings
+from .settings import CompressorSettings, CrossoverSettings, DeviceSettings, EQBandSettings, LimiterSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import build_state, channel_label
-from .tuning import EQ_TYPES, TuningController, band_in_use, cleared_band
+from .tuning import ALLPASS_TYPES, EQ_TYPES, TuningController, band_in_use, clamp_dynamics, cleared_band
 
 LOG = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).with_name("web")
@@ -240,7 +240,11 @@ class _Studio:
         if not all(isinstance(field, str) for field in values):
             raise ValueError("field must be a string")
         if kind in ("limiter", "compressor"):
-            self._edit_dynamics(output, channel, kind, values)
+            if not output:
+                raise ValueError(f"the {kind} exists on outputs only")
+            dynamics_key, dynamics = self.tuning.dynamics_edit(
+                self.token, channel, kind, {f: self._field_value(f, v) for f, v in values.items()})
+            self._stage_edit(dynamics_key, dynamics, list(values))
             return
         key: ControlKey | None = None
         block: Any = None
@@ -268,36 +272,26 @@ class _Studio:
                 f.name: getattr(edited, f.name) for f in fields(edited)
                 if getattr(edited, f.name) != getattr(current, f.name)})
         assert key is not None
-        draft = self.service.view(self.token).draft
-        self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: block}))
+        typed = list(values)
+        if kind == "eq" and "type" in values:
+            # A type change also resets the slope, and pins an allpass band's gain: the member gets those too.
+            typed += ["slope"] + (["gain_db"] if block.type in ALLPASS_TYPES else [])
+        self._stage_edit(key, block, typed)
 
-    def _edit_dynamics(self, output: bool, channel: int, kind: str, values: dict[str, Any]) -> None:
-        """Stage a limiter or compressor edit. Only the limiter is tied by links, and then only the fields of this
-        edit reach a member, applied to the member's own block: a member's other fields (its enable flag, its
-        threshold) are never rewritten by an edit of this one. An edit that changes nothing stages nothing, so
-        unticking a disabled factory block (whose stored values the unit would refuse) is a no-op."""
-        if not output:
-            raise ValueError(f"the {kind} exists on outputs only")
-        typed = {f: self._field_value(f, v) for f, v in values.items()}
-        key, block = self.tuning.dynamics_edit(self.token, channel, kind, typed)
+    def _stage_edit(self, key: ControlKey, after: object, typed: Sequence[str]) -> None:
+        """Stage an edit of one block (or delay) of a channel and, through links, the same fields of it on every tied
+        member, applied to each member's own block. An edit that changes nothing on the channel stages nothing there,
+        so unticking a disabled factory block (whose stored values the unit would refuse) is a no-op."""
         draft = self.service.view(self.token).draft
-        edits: dict[ControlKey, object] = {}
-        if not same_value(block, controls(draft)[key]):
-            edits[key] = block
-        group = links.tied_group(self._notes().links, key)
-        if group is not None:
-            self._stage_members(group, key, kind, typed, draft, edits)
+        before = controls(draft)[key]
+        updates = links.changed_fields(before, after, typed)
+        edits: dict[ControlKey, object] = {} if same_value(before, after) else {key: after}
+        for target, value in links.expand_fields(self._notes().links, draft, key, after, updates).items():
+            if isinstance(value, (LimiterSettings, CompressorSettings)) and updates is not None:
+                value = clamp_dynamics(key.block, value, keep=set(updates))
+            edits[target] = value
         if edits:
             self.service.stage_many(self.token, edits)
-
-    def _stage_members(self, group: LinkGroup, key: ControlKey, kind: str, typed: dict[str, Any],
-                       draft: DeviceSettings, edits: dict[ControlKey, object]) -> None:
-        """Add to `edits` the typed fields on each other member's own block; refuse if a member's cannot be written."""
-        channel = key.channel
-        for member in (m for m in group.members if m != channel):
-            member_key, member_block = self.tuning.dynamics_edit(self.token, member, kind, typed)
-            if not same_value(member_block, controls(draft)[member_key]):
-                edits[member_key] = member_block
 
     @staticmethod
     def _field_value(field: str, value: object) -> object:

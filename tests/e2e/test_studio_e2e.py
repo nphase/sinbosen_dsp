@@ -1526,3 +1526,20 @@ def test_dynamics_edits_send_nothing_off_loopback(studio: Studio) -> None:
     studio.field("Limiter threshold").press("Enter")
     studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
     assert {urlsplit(url).hostname for url in studio.requests} == {"127.0.0.1"}
+
+
+def test_a_linked_edit_changes_only_the_edited_field_on_the_other_member(studio: Studio) -> None:
+    _api(studio, "/api/edit", {"id": "out:3", "kind": "hp", "values": {"freq_hz": 2000, "filter_type": 1}})
+    _api(studio, "/api/apply", {})
+    _api(studio, "/api/link", {"id": "out:2", "letter": None})
+    _api(studio, "/api/link", {"id": "out:3", "letter": "A"})
+    _api(studio, "/api/revert", {})
+    studio.select("Out 3")
+    field = studio.field("High-pass frequency")
+    field.fill("120")
+    with studio.page.expect_response("**/api/edit"):
+        field.press("Enter")
+    studio.unapplied().get_by_text("2 unapplied", exact=True).wait_for()
+    studio.select("Out 4")
+    assert studio.field("High-pass frequency").input_value() == "120"
+    assert studio.field("High-pass family").evaluate("el => el.selectedOptions[0].text") == "Linkwitz"

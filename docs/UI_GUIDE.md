@@ -120,7 +120,10 @@ colour. Inputs link only with inputs and outputs only with outputs. A group
 ties some of the sections crossover, EQ, delay and limiter; a new group ties
 crossover and EQ, and the tick boxes in the selected-channel bar change that.
 While tied, an edit to one of those sections on one member is made on every
-member, as a draft. Links never tie gain, mute or polarity: each channel's level
+member, as a draft: only the fields you edited (a frequency, an enable tick, a
+gain) are set on the other members, each on its own block, so members that differ
+keep their other values. Actions that set a whole block (Add band, removing a
+band, REW import, joining and Copy from) set the whole block on every member. Links never tie gain, mute or polarity: each channel's level
 is its own, and joining a group or copying from a member never writes anything
 to the unit at once. A group stored by an earlier version that tied gain keeps
 its other sections.

@@ -1278,3 +1278,113 @@ def test_a_channel_joining_a_group_takes_the_limiter_when_its_own_can_be_written
     state = post(client, "/api/link", id="out:1", letter="A")
     assert state["status"]["pending_count"] == 1
     assert _limiter_of(client, "out:1")["threshold_db"] == -8.0
+
+
+# Links carry only the fields that were edited, onto each member's own block
+
+def _hp(client: TestClient, channel_id: str) -> dict[str, Any]:
+    card = next(c for c in post(client, "/api/select", id=channel_id)["selected"]["filters"] if c["key"] == "hp")
+    return {"enabled": card["enabled"], **{f["key"]: f["value"] for f in card["fields"]}}
+
+
+def _band(client: TestClient, channel_id: str, index: int) -> dict[str, Any] | None:
+    card = next((c for c in post(client, "/api/select", id=channel_id)["selected"]["filters"]
+                 if c["key"] == f"eq:{index}"), None)
+    return None if card is None else {"enabled": card["enabled"], **{f["key"]: f["value"] for f in card["fields"]}}
+
+
+def _out_1_and_2_linked_with_different_filters(client: TestClient, sections: list[str] | None = None) -> None:
+    """Out 1: high-pass 80 Hz Butterworth 12 off. Out 2: 2000 Hz Linkwitz-Riley 24 on, EQ 3 at 500 Hz Q 2 +3 dB.
+    The group starts out of sync: joining is undone with Revert."""
+    post(client, "/api/edit", id="out:0", kind="hp",
+         values={"freq_hz": 80, "filter_type": 0, "slope_db_per_oct": 12})
+    post(client, "/api/edit", id="out:1", kind="hp",
+         values={"freq_hz": 2000, "filter_type": 1, "slope_db_per_oct": 24, "enabled": True})
+    post(client, "/api/edit", id="out:1", kind="eq", index=2,
+         values={"enabled": True, "freq_hz": 500, "q": 2.0, "gain_db": 3.0})
+    post(client, "/api/edit", id="out:0", kind="eq", index=2, values={"enabled": True, "freq_hz": 1000})
+    post(client, "/api/apply")
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    post(client, "/api/revert")
+    if sections is not None:
+        post(client, "/api/link/sections", letter="A", sections=sections)
+
+
+OUT_2_HP = {"enabled": True, "freq_hz": 2000, "filter_type": 1, "slope_db_per_oct": 24}
+
+
+def test_a_high_pass_frequency_edit_changes_only_that_field_on_the_member(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client)
+    state = post(client, "/api/edit", id="out:0", kind="hp", field="freq_hz", value=120)
+    assert state["status"]["pending_count"] == 2
+    assert _hp(client, "out:1") == {**OUT_2_HP, "freq_hz": 120}
+    assert _hp(client, "out:0") == {"enabled": False, "freq_hz": 120, "filter_type": 0, "slope_db_per_oct": 12}
+
+
+def test_a_high_pass_enable_toggle_changes_only_the_enable_flag_on_the_member(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client)
+    post(client, "/api/edit", id="out:0", kind="hp", field="enabled", value=True)
+    assert _hp(client, "out:1") == OUT_2_HP
+    post(client, "/api/edit", id="out:0", kind="hp", field="enabled", value=False)
+    assert _hp(client, "out:1") == {**OUT_2_HP, "enabled": False}
+    assert _hp(client, "out:0")["freq_hz"] == 80
+
+
+def test_a_multi_field_drag_carries_exactly_its_fields(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client)
+    post(client, "/api/edit", id="out:0", kind="hp", values={"freq_hz": 300, "slope_db_per_oct": 36})
+    assert _hp(client, "out:1") == {**OUT_2_HP, "freq_hz": 300, "slope_db_per_oct": 36}
+
+
+def test_an_eq_gain_edit_changes_only_the_gain_of_that_band_on_the_member(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client)
+    member, source = _band(client, "out:1", 2), _band(client, "out:0", 2)
+    assert member is not None and source is not None and member["gain_db"] == 3.0
+    post(client, "/api/edit", id="out:0", kind="eq", index=2, field="gain_db", value=5.0)
+    assert _band(client, "out:1", 2) == {**member, "gain_db": 5.0}
+    assert _band(client, "out:0", 2) == {**source, "gain_db": 5.0}
+
+
+def test_an_eq_type_change_carries_the_fields_it_resets(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client)
+    member = _band(client, "out:1", 2)
+    post(client, "/api/edit", id="out:0", kind="eq", index=2, field="type", value=3)  # allpass: gain pinned to 0
+    assert _band(client, "out:1", 2) == {**member, "type": 3, "gain_db": 0.0}
+
+
+def test_a_delay_edit_still_sets_the_members_delay(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client, ["delay"])
+    state = post(client, "/api/edit", id="out:0", kind="delay", field="delay_ms", value=1.5)
+    assert channel(state, "out:1")["delay_ms"] == 1.5
+
+
+def test_sections_the_group_does_not_tie_never_propagate(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client, ["eq"])
+    state = post(client, "/api/edit", id="out:0", kind="hp", field="freq_hz", value=120)
+    assert state["status"]["pending_count"] == 1
+    assert _hp(client, "out:1") == OUT_2_HP
+
+
+def test_members_that_were_in_sync_end_identical_after_any_edit(client: TestClient) -> None:
+    post(client, "/api/link", id="out:3", letter=None)
+    post(client, "/api/link", id="out:4", letter="A")
+    post(client, "/api/revert")
+    post(client, "/api/edit", id="out:3", kind="hp", values={"freq_hz": 90, "enabled": True})
+    post(client, "/api/edit", id="out:3", kind="hp", field="filter_type", value=1)
+    post(client, "/api/edit", id="out:3", kind="eq", index=1, values={"enabled": True, "gain_db": -2.0})
+    assert _hp(client, "out:3") == _hp(client, "out:4")
+    assert _band(client, "out:3", 1) == _band(client, "out:4", 1)
+    assert channel(post(client, "/api/select", id="out:3"), "out:3")["link"]["in_sync"] is True
+
+
+def test_add_and_remove_band_are_whole_block_on_members(client: TestClient) -> None:
+    _out_1_and_2_linked_with_different_filters(client)
+    post(client, "/api/band/remove", id="out:0", index=2)
+    removed = _band(client, "out:0", 2)
+    assert removed is None  # a cleared band is no longer in use
+    assert _band(client, "out:1", 2) is None  # the member's band is cleared too, not just its enable flag
+    post(client, "/api/revert")
+    post(client, "/api/band/add", id="out:0")  # the first band not in use on Out 1
+    added = _band(client, "out:0", 0)
+    assert added is not None and _band(client, "out:1", 0) == added

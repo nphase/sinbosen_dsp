@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
 from string import ascii_uppercase
+from typing import Any
 
 from .service import ControlKey, controls, same_value
 from .settings import DeviceSettings
@@ -41,6 +42,29 @@ def expand(groups: Sequence[LinkGroup], settings: DeviceSettings,
             if member != key.channel and target in available and target not in edits:
                 result.setdefault(target, value)
     return result
+
+
+def changed_fields(before: object, after: object, typed: Sequence[str]) -> dict[str, Any] | None:
+    """The fields an edit set, with the values it gave them: the ones the user typed, and any other that the edit
+    moved on the edited block (a type change that resets a slope). None for a single value such as a delay."""
+    if not is_dataclass(after):
+        return None
+    names = {*typed, *(f.name for f in fields(after) if getattr(after, f.name) != getattr(before, f.name))}
+    return {name: getattr(after, name) for name in names if name != "raw"}
+
+
+def expand_fields(groups: Sequence[LinkGroup], settings: DeviceSettings, key: ControlKey, after: object,
+                  updates: dict[str, Any] | None) -> dict[ControlKey, object]:
+    """The edit of `key` as it reaches every other member of a group tying its section: only the `updates` fields,
+    set on the member's own current block at the same key (`after` itself for a single value). Members that differ
+    keep their other fields."""
+    group = tied_group(groups, key)
+    if group is None:
+        return {}
+    available: dict[ControlKey, Any] = controls(settings)
+    targets = {m: replace(key, channel=m) for m in group.members if m != key.channel}
+    return {target: after if updates is None else replace(available[target], **updates)
+            for target in targets.values() if target in available}
 
 
 def tied_group(groups: Sequence[LinkGroup], key: ControlKey) -> LinkGroup | None:

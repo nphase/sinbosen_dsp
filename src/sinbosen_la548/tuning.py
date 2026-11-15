@@ -50,6 +50,13 @@ DYNAMICS_FIELDS: dict[str, tuple[DynamicsField, ...]] = {
 }
 
 
+def clamp_dynamics(kind: str, block: Any, *, keep: set[str]) -> Any:
+    """The block with each numeric field outside the engine's range, except those in `keep`, moved to the nearest
+    allowed value."""
+    return replace(block, **{f.name: min(max(getattr(block, f.name), f.low), f.high)
+                             for f in DYNAMICS_FIELDS[kind] if f.name not in keep})
+
+
 def _range_text(field: DynamicsField) -> str:
     return f"{field.label} must be from {field.low:g} to {field.high:g}{' ' + field.unit if field.unit else ''}"
 
@@ -158,9 +165,7 @@ class TuningController:
         edited = replace(block, **updates)
         if same_value(edited, block):
             return ControlKey(True, channel, kind), block
-        clamped = {f.name: min(max(getattr(edited, f.name), f.low), f.high)
-                   for f in numbers.values() if f.name not in updates}
-        return ControlKey(True, channel, kind), replace(edited, **clamped)
+        return ControlKey(True, channel, kind), clamp_dynamics(kind, edited, keep=set(updates))
 
     def add_allpass(self, token: str, output: bool, channel: int) -> int:
         ch = self.channel(token, output, channel)
