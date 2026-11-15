@@ -229,12 +229,15 @@ class _Studio:
         values = body["values"] if "values" in body else {body.get("field"): body.get("value")}
         if not isinstance(values, dict) or not values:
             raise ValueError("values must be an object of field: value")
+        if not all(isinstance(field, str) for field in values):
+            raise ValueError("field must be a string")
+        if kind in ("limiter", "compressor"):
+            self._edit_dynamics(output, channel, kind, values)
+            return
         key: ControlKey | None = None
         block: Any = None
         edited: CrossoverSettings | EQBandSettings
         for field, value in values.items():
-            if not isinstance(field, str):
-                raise ValueError("field must be a string")
             if kind == "delay":
                 if field != "delay_ms":
                     raise ValueError("unsupported delay field")
@@ -258,6 +261,18 @@ class _Studio:
                 if getattr(edited, f.name) != getattr(current, f.name)})
         assert key is not None
         draft = self.service.view(self.token).draft
+        self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: block}))
+
+    def _edit_dynamics(self, output: bool, channel: int, kind: str, values: dict[str, Any]) -> None:
+        """Stage a limiter or compressor edit. Only the limiter is tied by links; an edit that changes nothing stages
+        nothing, so unticking a disabled factory block (whose stored values the unit would refuse) is a no-op."""
+        if not output:
+            raise ValueError(f"the {kind} exists on outputs only")
+        key, block = self.tuning.dynamics_edit(self.token, channel, kind,
+                                               {f: self._field_value(f, v) for f, v in values.items()})
+        draft = self.service.view(self.token).draft
+        if same_value(block, controls(draft)[key]):
+            return
         self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: block}))
 
     @staticmethod

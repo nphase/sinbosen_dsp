@@ -362,11 +362,14 @@ select.field option { background: var(--panel); color: var(--text); }
   color: var(--text-2);
 }
 .add-band .count { font-size: 11px; color: var(--muted); }
+.card-note { font-size: 11px; line-height: 1.3; color: var(--muted); }
+.card.readonly .field, .card.readonly .check { color: var(--muted); }
+/* The limiter and compressor cards, then the rows that are only shown, at the right of the filter cards. */
+.stack { display: flex; align-items: flex-start; gap: 4px; margin-left: auto; }
 .more {
   flex: 0 0 150px;
   display: flex;
   flex-direction: column;
-  margin-left: auto;
   background: var(--panel);
   border: 1px solid var(--rule);
   border-radius: 4px;

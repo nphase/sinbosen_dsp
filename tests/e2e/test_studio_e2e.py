@@ -197,7 +197,7 @@ def test_label_selects_channel_and_shows_its_cards(studio: Studio) -> None:
     strip = studio.page.locator(".strip", has=studio.page.get_by_role("button", name="Out 3", exact=True))
     assert "selected" in (strip.get_attribute("class") or "")
     cards = studio.page.locator("#cards .card-title")
-    assert cards.all_inner_texts() == ["High-pass", "Low-pass"]
+    assert cards.all_inner_texts() == ["High-pass", "Low-pass", "Limiter", "Compressor"]
     assert studio.field("High-pass frequency").input_value() == "20"
     studio.select("In A")
     assert studio.page.locator("#cards .card-title").count() == 0
@@ -1312,14 +1312,15 @@ def test_replace_stages_the_bands_as_unapplied_cards_and_revert_clears_them(stud
     dialog.wait_for(state="detached")
     studio.unapplied().get_by_text("3 unapplied", exact=True).wait_for()
     cards = page.locator("#cards .card")
-    assert cards.locator(".card-title").all_inner_texts() == ["High-pass", "Low-pass", "EQ 1", "EQ 2"]
+    assert cards.locator(".card-title").all_inner_texts() == ["High-pass", "Low-pass", "EQ 1", "EQ 2", "Limiter",
+                                                              "Compressor"]
     assert all("pending" in (card.get_attribute("class") or "")
                for card in (cards.nth(0), cards.nth(2), cards.nth(3)))
     assert "pending" not in (cards.nth(1).get_attribute("class") or "")
     assert studio.field("High-pass frequency").input_value() == "100"
     page.get_by_role("button", name="Revert", exact=True).click()
     studio.unapplied().get_by_text("3 unapplied", exact=True).wait_for(state="detached")
-    assert page.locator("#cards .card-title").all_inner_texts() == ["High-pass", "Low-pass"]
+    assert page.locator("#cards .card-title").all_inner_texts() == ["High-pass", "Low-pass", "Limiter", "Compressor"]
     assert studio.field("High-pass frequency").input_value() == "20"
 
 
@@ -1374,3 +1375,117 @@ def test_with_live_on_the_dialog_says_it_will_be_sent_straight_away(connected_st
     dialog.get_by_text("Live is on: this will be sent to the unit straight away.", exact=True).wait_for()
     assert dialog.get_by_text("until you press Apply", exact=False).count() == 0
     dialog.get_by_role("button", name="Cancel", exact=True).click()
+
+
+# Limiter and compressor cards
+
+def _dynamics_card(studio: Studio, title: str) -> Any:
+    return studio.page.locator("#cards .card", has=studio.page.get_by_text(title, exact=True))
+
+
+def test_the_limiter_and_compressor_cards_are_on_outputs_only(studio: Studio) -> None:
+    for title in ("Limiter", "Compressor"):
+        card = _dynamics_card(studio, title)
+        assert card.count() == 1
+        assert card.get_by_role("checkbox").is_checked() is False
+    assert _dynamics_card(studio, "Limiter").locator(".card-row > span").all_inner_texts() == [
+        "Thr", "Atk", "Rel", "Det"]
+    assert _dynamics_card(studio, "Compressor").locator(".card-row > span").all_inner_texts() == [
+        "Thr", "Ratio", "Atk", "Rel"]
+    assert studio.field("Compressor ratio").input_value() == "1.0 : 1"
+    # FIR stays a read-only row of the right-hand stack.
+    assert studio.page.locator("#cards .more-row .name").all_inner_texts() == ["FIR"]
+    studio.select("In A")
+    assert studio.page.locator("#cards .card").count() == 0
+    assert studio.page.locator("#cards .more-row .name").all_inner_texts() == ["FIR"]
+
+
+def test_a_limiter_threshold_is_unapplied_until_apply(studio: Studio) -> None:
+    field = studio.field("Limiter threshold")
+    assert field.input_value() == "0.0 dB"
+    field.fill("-6")
+    field.press("Enter")
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    assert studio.border("Limiter threshold") == PENDING_BORDER
+    assert field.input_value() == "-6.0 dB"
+    assert "pending" in (_dynamics_card(studio, "Limiter").get_attribute("class") or "")
+    assert studio.border("Limiter attack") != PENDING_BORDER
+    studio.page.get_by_role("button", name="Apply", exact=True).click()
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for(state="detached")
+    assert field.input_value() == "-6.0 dB"
+    assert studio.border("Limiter threshold") != PENDING_BORDER
+
+
+def test_a_typed_dynamics_value_is_shown_as_the_device_stores_it(studio: Studio) -> None:
+    field = studio.field("Compressor ratio")
+    field.fill("4:1")
+    field.press("Enter")
+    studio.until("Compressor ratio", "value", "4.0 : 1")
+    field = studio.field("Compressor attack")
+    field.fill("2.4 ms")
+    field.press("Enter")
+    studio.until("Compressor attack", "value", "2 ms")
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+
+
+def test_a_dynamics_value_out_of_range_is_refused_with_its_range(studio: Studio) -> None:
+    field = studio.field("Limiter threshold")
+    field.fill("25")
+    field.press("Enter")
+    message = studio.page.locator(".field-error")
+    message.get_by_text(re.compile("Threshold must be from -60 to 20 dB")).wait_for()
+    assert studio.border("Limiter threshold") == ERROR_BORDER
+    assert studio.unapplied().inner_text() == ""
+    field.press("Escape")
+    assert field.input_value() == "0.0 dB"
+    studio.errors[:] = [e for e in studio.errors if "status of 400" not in e]
+
+
+def test_the_compressor_can_be_enabled_and_disabled(studio: Studio) -> None:
+    tick = studio.page.get_by_role("checkbox", name="Compressor", exact=True)
+    tick.check()
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    assert "pending" in (studio.page.get_by_text("Compressor", exact=True).locator("..").get_attribute("class") or "")
+    assert "off" not in (_dynamics_card(studio, "Compressor").get_attribute("class") or "").split()
+    tick.uncheck()
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for(state="detached")
+
+
+def test_limiter_detection_is_a_select(studio: Studio) -> None:
+    select = studio.field("Limiter detection")
+    assert select.evaluate("el => [...el.options].map(o => o.text)") == ["Average", "Peak"]
+    select.select_option("Peak")
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    assert studio.border("Limiter detection") == PENDING_BORDER
+    studio.until("Limiter detection", "value", "1")
+
+
+def test_a_factory_disabled_compressor_shows_its_values_and_enabling_it_stages_valid_ones(studio: Studio) -> None:
+    studio.select("Out 3")
+    assert studio.field("Compressor ratio").input_value() == "0.0 : 1"
+    assert studio.field("Compressor threshold").input_value() == "340.0 dB"
+    studio.page.get_by_role("checkbox", name="Compressor", exact=True).check()
+    studio.until("Compressor ratio", "value", "1.0 : 1")
+    assert studio.field("Compressor threshold").input_value() == "20.0 dB"
+    assert studio.border("Compressor ratio") == PENDING_BORDER
+    assert studio.border("Compressor release") != PENDING_BORDER
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    studio.page.get_by_role("button", name="Apply", exact=True).click()
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for(state="detached")
+
+
+def test_a_block_the_engine_refuses_to_write_is_read_only_with_its_reason(studio: Studio) -> None:
+    studio.select("Out 3")
+    card = _dynamics_card(studio, "Limiter")
+    assert "unused limiter bytes" in card.locator(".card-note").inner_text()
+    assert card.get_by_role("checkbox").is_disabled()
+    assert studio.field("Limiter threshold").is_disabled()
+    assert studio.field("Limiter detection").is_disabled()
+    assert not _dynamics_card(studio, "Compressor").locator(".card-note").count()
+
+
+def test_dynamics_edits_send_nothing_off_loopback(studio: Studio) -> None:
+    studio.field("Limiter threshold").fill("-3")
+    studio.field("Limiter threshold").press("Enter")
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    assert {urlsplit(url).hostname for url in studio.requests} == {"127.0.0.1"}

@@ -172,8 +172,25 @@ frequency and Q. **Add band** enables the first band not in use and shows
 **Import from REW...** on the selected-channel bar is described under "Importing
 REW filters" below.
 
-At the right, a small list shows whether the limiter, the compressor and the FIR
-are on (an input has only the FIR). They cannot be edited here yet.
+At the right of an output's cards sit the **Limiter** and **Compressor** cards,
+laid out like the filter cards: a tick in the title enables the block and each
+field is a draft, shown unapplied until **Apply** (or sent by **Live**) and
+undone by **Revert**. The limiter has Threshold (dB), Attack (ms), Release (ms)
+and Detection (Average or Peak); the compressor has Threshold, Ratio (shown as
+`4.0 : 1`), Attack and Release. The ranges are the unit's: a value outside one
+is refused with the allowed range, and an accepted value is shown as the unit
+will store it (thresholds in 0.5 dB steps, the ratio in 0.1 steps, release in
+whole ms, attack in 0.1 ms up to 1 ms and whole ms beyond). A disabled
+compressor on a factory unit stores values the unit would refuse (a ratio of 0
+and a threshold of +340 dB); the card shows them as stored, and enabling or
+editing it moves each stored value that is outside its range to the nearest
+allowed one and shows those as unapplied. If the unit's stored bytes for a
+block cannot be preserved by a write (as with a factory limiter on some
+channels), its card is read-only and says so. A limiter edit follows a link
+group that ties **Limiter**; the compressor is never linked. Neither block is
+drawn on the plot, as their effect depends on the signal level, and neither
+changes the latency readout. The FIR stays a row below, showing On or Off (an
+input has only the FIR, and no limiter or compressor).
 
 ### Importing REW filters
 
@@ -277,8 +294,8 @@ These need `--classic` for now:
   "Saving");
 - measured traces, the Measured overlay and alignment;
 - FIR coefficient backup and restore;
-- editing the limiter, compressor, FIR and the other advanced blocks
-  (dynamic EQ, expander, input source, frequency shifter).
+- editing the FIR and the other advanced blocks (dynamic EQ, expander, input
+  source, frequency shifter).
 
 Start the classic UI with `uv run --extra ui sinbosen-la548-ui --classic`. It is a
 separate launch, not a screen in the same process, and the two UIs cannot be open

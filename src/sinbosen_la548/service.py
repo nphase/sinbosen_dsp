@@ -258,6 +258,15 @@ def _check_unused(value: object) -> None:
         raise ValueError("cannot preserve unused limiter bytes through the current write API")
 
 
+def write_refusal(value: object) -> str | None:
+    """Why the write API cannot preserve this block's stored bytes, or None when it can."""
+    try:
+        _check_unused(value)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
 def normalize_control(key: ControlKey, value: object) -> object:
     """Validate edited blocks only; never encode unrelated disabled defaults."""
     _finite_values(value)

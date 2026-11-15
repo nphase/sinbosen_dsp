@@ -3,6 +3,7 @@
 // page, so focus, caret and open dropdowns survive the once-a-second refresh.
 
 import { ApiError, getState, post } from "./api.js";
+import { createDynamics } from "./dynamics.js";
 import { createHandleGestures, targetOf } from "./handles.js";
 import { createMixer } from "./mixer.js";
 import { createPlot } from "./plot.js";
@@ -96,6 +97,7 @@ const cls = (...names) => names.filter(Boolean).join(" ");
 const savePopover = createSavePopover({ ui, state: () => state, h, act, cls, below, send, render });
 const rewDialog = createRewDialog({ ui, state: () => state, h, act, below, send, render });
 const mixer = createMixer({ state: () => state, h, act, cls, send, render });
+const dynamics = createDynamics({ state: () => state, h, act, cls, send, textInput, fixed, numberParser });
 
 function act(handler) {
   const id = String(actions.size);
@@ -582,9 +584,12 @@ function cards() {
       "data-action": act(() => send("/api/band/add", { id: selected.id })),
     }, icon(PLUS_ICON), h("span", null, "Add band"),
     h("span", { class: "count" }, `${selected.eq_used} of ${selected.eq_slots} used`)),
-    h("div", { class: "more", "data-key": "more", role: "list", "aria-label": "Other blocks" },
-      selected.more.map((block) => h("div", { class: "more-row", role: "listitem" },
-        h("span", { class: "name" }, block.name), h("span", { class: "state" }, block.state)))),
+    // The right-hand stack: the limiter and compressor cards, and the blocks that are only shown.
+    h("div", { class: "stack", "data-key": "stack" },
+      dynamics.cards(),
+      h("div", { class: "more", "data-key": "more", role: "list", "aria-label": "Other blocks" },
+        selected.more.map((block) => h("div", { class: "more-row", role: "listitem" },
+          h("span", { class: "name" }, block.name), h("span", { class: "state" }, block.state))))),
   ];
 }
 

@@ -14,10 +14,17 @@ from . import codecs
 from .fir_adapter import FIRParameters
 from .links import in_sync
 from .response import Response, channel_response, frequency_grid
-from .service import Change, ControlKey, ServiceView
-from .settings import ChannelSettings, CrossoverSettings, DeviceSettings, EQBandSettings
+from .service import Change, ControlKey, ServiceView, write_refusal
+from .settings import (
+    ChannelSettings,
+    CompressorSettings,
+    CrossoverSettings,
+    DeviceSettings,
+    EQBandSettings,
+    LimiterSettings,
+)
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup
-from .tuning import ALLPASS_TYPES, EQ_TYPES, XOVER_TYPES, band_in_use
+from .tuning import ALLPASS_TYPES, DYNAMICS_FIELDS, EQ_TYPES, LIMITER_DETECTION, XOVER_TYPES, band_in_use
 
 _PALETTE = ("#C58BFF", "#F2A33A", "#5FD0A5", "#FF7A9C", "#6BC7F0", "#D9D35A", "#E8825A", "#9AA8FF")
 LINK_COLOURS: dict[str, str] = {letter: _PALETTE[i % len(_PALETTE)] for i, letter in enumerate(ascii_uppercase)}
@@ -136,8 +143,33 @@ def _filter_cards(draft: ChannelSettings, baseline: ChannelSettings,
     return cards
 
 
+def _dynamics_card(kind: str, block: LimiterSettings | CompressorSettings | None,
+                   base: LimiterSettings | CompressorSettings | None, key: ControlKey,
+                   pending_keys: set[ControlKey]) -> dict[str, Any] | None:
+    """The Limiter or Compressor card: null where the channel has none. The ranges are the engine's; a disabled
+    block may store values outside them, which are shown as stored. A block the engine will not write is read-only."""
+    if block is None:
+        return None
+
+    def differs(attr: str) -> bool:
+        return _differs(base, block, attr)
+
+    fields: dict[str, Any] = {
+        f.name: {"value": round(getattr(block, f.name), 3), "min": f.low, "max": f.high, "step": f.step,
+                 "pending": differs(f.name)} for f in DYNAMICS_FIELDS[kind]}
+    if isinstance(block, LimiterSettings):
+        options = [_option(v, n) for v, n in LIMITER_DETECTION.items()]
+        if block.detection_type not in LIMITER_DETECTION:
+            options.append({**_option(block.detection_type, f"Unresolved ({block.detection_type})"),
+                            "unresolved": True})
+        fields["detection_type"] = {"value": block.detection_type, "options": options,
+                                    "pending": differs("detection_type")}
+    return {"enabled": block.enabled, "enabled_pending": differs("enabled"), "pending": key in pending_keys,
+            "readonly_reason": write_refusal(block), "fields": fields}
+
+
 def _more_rows(ch: ChannelSettings) -> list[dict[str, str]]:
-    blocks = (("Limiter", ch.limiter), ("Compressor", ch.compressor), ("FIR", ch.fir))
+    blocks = (("FIR", ch.fir),)
     return [{"name": name, "state": "On" if block.enabled else "Off"} for name, block in blocks if block is not None]
 
 
@@ -328,7 +360,12 @@ def _selected_entry(view: ServiceView, notes: DeviceNotes, selected: tuple[bool,
     return {"id": _channel_id(output, index), "label": channel_label(output, index),
             "nickname": notes.nicknames.get(selected, ""), "eq_slots": len(draft.eq_bands),
             "eq_used": sum(band_in_use(b) for b in draft.eq_bands), "link": link,
-            "filters": _filter_cards(draft, baseline, pending_keys), "more": _more_rows(draft),
+            "filters": _filter_cards(draft, baseline, pending_keys),
+            "limiter": _dynamics_card("limiter", draft.limiter, baseline.limiter,
+                                      ControlKey(output, index, "limiter"), pending_keys),
+            "compressor": _dynamics_card("compressor", draft.compressor, baseline.compressor,
+                                         ControlKey(output, index, "compressor"), pending_keys),
+            "more": _more_rows(draft),
             "latency": _latency(view.draft, selected, notes.nicknames.get(selected) or channel_label(output, index))}
 
 

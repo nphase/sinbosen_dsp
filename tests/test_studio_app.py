@@ -23,7 +23,7 @@ with warnings.catch_warnings():
     from starlette.testclient import TestClient
 
 from sinbosen_la548.client import Client, LockState  # noqa: E402
-from sinbosen_la548.service import ControlKey, DSPService, demo_settings, replace_control  # noqa: E402
+from sinbosen_la548.service import ControlKey, DSPService, controls, demo_settings, replace_control  # noqa: E402
 from sinbosen_la548.studio_app import create_studio_app  # noqa: E402
 from sinbosen_la548.studio_store import StudioStore  # noqa: E402
 
@@ -1010,3 +1010,172 @@ def test_rew_import_is_a_draft_even_with_live_off_and_never_an_immediate_write(s
         assert device.writes == []
     device.client.set_eq_band.assert_not_called()
     device.client.set_xover.assert_not_called()
+
+
+# Limiter and compressor editors
+
+LIMITER_EDITS = [("threshold_db", -6.0), ("start_time_ms", 5.0), ("release_time_ms", 200.0), ("detection_type", 1),
+                 ("enabled", True)]
+COMPRESSOR_EDITS = [("threshold_db", -20.0), ("ratio", 4.0), ("start_time_ms", 10.0), ("release_time_ms", 300.0),
+                    ("enabled", True)]
+
+
+def dynamics(state: dict[str, Any], kind: str) -> dict[str, Any]:
+    return state["selected"][kind]
+
+
+def value_of(state: dict[str, Any], kind: str, name: str) -> Any:
+    block = dynamics(state, kind)
+    return block["enabled"] if name == "enabled" else block["fields"][name]["value"]
+
+
+@pytest.mark.parametrize(("kind", "edits"), [("limiter", LIMITER_EDITS), ("compressor", COMPRESSOR_EDITS)])
+def test_each_dynamics_field_is_an_unapplied_edit_that_revert_clears(client: TestClient, kind: str,
+                                                                     edits: list[tuple[str, Any]]) -> None:
+    for name, value in edits:
+        state = post(client, "/api/edit", id="out:0", kind=kind, field=name, value=value)
+        assert value_of(state, kind, name) == value
+        assert dynamics(state, kind)["pending"] is True
+        assert state["status"]["pending_count"] == 1
+        state = post(client, "/api/revert")
+        assert state["status"]["pending_count"] == 0
+        assert dynamics(state, kind)["pending"] is False
+        assert value_of(state, kind, name) != value
+
+
+def test_a_dynamics_edit_takes_several_fields_at_once(client: TestClient) -> None:
+    state = post(client, "/api/edit", id="out:0", kind="compressor",
+                 values={"enabled": True, "threshold_db": -12.0, "ratio": 8.0})
+    assert [value_of(state, "compressor", n) for n in ("enabled", "threshold_db", "ratio")] == [True, -12.0, 8.0]
+    assert state["status"]["pending_count"] == 1
+
+
+def test_a_typed_value_is_shown_as_the_value_the_device_stores(client: TestClient) -> None:
+    state = post(client, "/api/edit", id="out:0", kind="compressor",
+                 values={"threshold_db": -10.3, "ratio": 4.26, "start_time_ms": 2.4, "release_time_ms": 100.7})
+    assert [value_of(state, "compressor", n) for n in ("threshold_db", "ratio", "start_time_ms",
+                                                       "release_time_ms")] == [-10.5, 4.2, 2.0, 100.0]
+
+
+def test_enabling_the_factory_compressor_stages_a_block_the_device_accepts(client: TestClient) -> None:
+    state = post(client, "/api/edit", id="out:2", kind="compressor", field="enabled", value=True)
+    block = dynamics(post(client, "/api/select", id="out:2"), "compressor")
+    assert block["enabled"] is True and block["pending"] is True
+    assert {n: f["value"] for n, f in block["fields"].items()} == {
+        "threshold_db": 20.0, "ratio": 1.0, "start_time_ms": 3.0, "release_time_ms": 100.0}
+    assert block["fields"]["threshold_db"]["pending"] is True
+    assert block["fields"]["ratio"]["pending"] is True
+    assert block["fields"]["release_time_ms"]["pending"] is False
+    assert state["status"]["pending_count"] == 1
+    assert post(client, "/api/apply")["result"]["ok"] is True
+
+
+def test_editing_the_factory_compressor_clamps_the_fields_that_were_not_typed(client: TestClient) -> None:
+    state = post(client, "/api/edit", id="out:2", kind="compressor", field="start_time_ms", value=7.0)
+    block = dynamics(post(client, "/api/select", id="out:2"), "compressor")
+    assert (block["enabled"], block["fields"]["start_time_ms"]["value"], block["fields"]["ratio"]["value"],
+            block["fields"]["threshold_db"]["value"]) == (False, 7.0, 1.0, 20.0)
+    assert state["status"]["pending_count"] == 1
+
+
+def test_unticking_a_disabled_factory_compressor_stages_nothing(client: TestClient) -> None:
+    state = post(client, "/api/edit", id="out:2", kind="compressor", field="enabled", value=False)
+    assert state["status"]["pending_count"] == 0
+
+
+@pytest.mark.parametrize(("kind", "values", "text"), [
+    ("limiter", {"threshold_db": 25}, "Threshold must be from -60 to 20 dB"),
+    ("limiter", {"threshold_db": -60.5}, "Threshold must be from -60 to 20 dB"),
+    ("limiter", {"start_time_ms": 0.2}, "Attack must be from 0.3 to 200 ms"),
+    ("limiter", {"release_time_ms": 5001}, "Release must be from 50 to 5000 ms"),
+    ("limiter", {"detection_type": 2}, "Detection must be Average or Peak"),
+    ("limiter", {"detection_type": 0.5}, "Detection must be Average or Peak"),
+    ("compressor", {"ratio": 0.5}, "Ratio must be from 1 to 128"),
+    ("compressor", {"ratio": 129}, "Ratio must be from 1 to 128"),
+    ("compressor", {"threshold_db": -6, "ratio": 0}, "Ratio must be from 1 to 128"),
+    ("compressor", {"enabled": 1}, "enabled must be true or false"),
+    ("compressor", {"threshold_db": "loud"}, "finite number"),
+    ("compressor", {"threshold_db": True}, "finite number"),
+    ("compressor", {"detection_type": 1}, "unsupported compressor field"),
+    ("limiter", {"ratio": 2}, "unsupported limiter field"),
+    ("limiter", {"bogus": 1}, "unsupported limiter field"),
+    ("limiter", {}, "values must be an object"),
+])
+def test_a_refused_dynamics_edit_names_the_range_and_stages_nothing(client: TestClient, kind: str,
+                                                                    values: dict[str, Any], text: str) -> None:
+    response = client.post("/api/edit", json={"id": "out:0", "kind": kind, "values": values})
+    assert response.status_code == 400
+    assert text in response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+@pytest.mark.parametrize("kind", ["limiter", "compressor"])
+def test_an_input_has_no_dynamics_block_to_edit(client: TestClient, kind: str) -> None:
+    response = client.post("/api/edit", json={"id": "in:0", "kind": kind, "field": "enabled", "value": True})
+    assert response.status_code == 400
+    assert "outputs only" in response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def test_a_block_the_engine_refuses_to_write_cannot_be_edited(client: TestClient) -> None:
+    response = client.post("/api/edit", json={"id": "out:2", "kind": "limiter", "field": "enabled", "value": True})
+    assert response.status_code == 400
+    assert "unused limiter bytes" in response.json()["error"]
+    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+def _link_outputs(client: TestClient, sections: list[str]) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    post(client, "/api/link/sections", letter="A", sections=sections)
+
+
+def test_a_limiter_edit_reaches_a_linked_output_only_when_the_group_ties_the_limiter(client: TestClient) -> None:
+    _link_outputs(client, ["crossover", "eq", "delay"])
+    state = post(client, "/api/edit", id="out:0", kind="limiter", field="threshold_db", value=-6.0)
+    assert state["status"]["pending_count"] == 1
+    assert value_of(post(client, "/api/select", id="out:1"), "limiter", "threshold_db") == 0.0
+    post(client, "/api/revert")
+    post(client, "/api/link/sections", letter="A", sections=["crossover", "eq", "delay", "limiter"])
+    state = post(client, "/api/edit", id="out:0", kind="limiter", values={"threshold_db": -6.0, "enabled": True})
+    assert state["status"]["pending_count"] == 2
+    assert value_of(post(client, "/api/select", id="out:1"), "limiter", "threshold_db") == -6.0
+
+
+def test_a_compressor_edit_never_reaches_a_linked_output(client: TestClient) -> None:
+    _link_outputs(client, ["crossover", "eq", "delay", "limiter"])
+    state = post(client, "/api/edit", id="out:0", kind="compressor", values={"threshold_db": -6.0, "enabled": True})
+    assert state["status"]["pending_count"] == 1
+    other = dynamics(post(client, "/api/select", id="out:1"), "compressor")
+    assert (other["enabled"], other["pending"]) == (False, False)
+
+
+def test_apply_writes_the_dynamics_blocks_to_the_device_and_clears_them(store: StudioStore) -> None:
+    device = FakeDevice()
+    written: list[tuple[str, int, dict[str, Any]]] = []
+
+    def set_block(kind: str) -> Any:
+        def write(channel: int, **kwargs: Any) -> None:
+            written.append((kind, channel, kwargs))
+            block = type(controls(device.settings)[ControlKey(True, channel, kind)])
+            raw = b"\x00" * 10  # the fake keeps no wire bytes; only the fields matter to the readback
+            kwargs.pop("output", None)
+            key = ControlKey(True, channel, kind)
+            device.settings = replace_control(device.settings, key, block(**kwargs, raw=raw))
+        return write
+
+    device.client.set_limiter.side_effect = set_block("limiter")
+    device.client.set_compressor.side_effect = set_block("compressor")
+    with connected(store, device) as client:
+        post(client, "/api/edit", id="out:0", kind="limiter", values={"threshold_db": -6.0, "enabled": True})
+        state = post(client, "/api/edit", id="out:0", kind="compressor", values={"ratio": 4.0, "enabled": True})
+        assert state["status"]["pending_count"] == 2
+        state = post(client, "/api/apply")
+    assert state["result"]["ok"] is True
+    assert state["status"]["pending_count"] == 0
+    assert dynamics(state, "limiter")["enabled"] is True and dynamics(state, "compressor")["enabled"] is True
+    sent = {kind: (channel, kwargs) for kind, channel, kwargs in written}
+    assert len(written) == 2
+    assert sent["limiter"][0] == sent["compressor"][0] == 0
+    assert sent["limiter"][1]["threshold_db"] == -6.0
+    assert sent["compressor"][1]["ratio"] == 4.0

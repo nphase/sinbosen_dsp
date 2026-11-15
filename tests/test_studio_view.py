@@ -93,8 +93,63 @@ def test_output_selection_has_crossover_cards_and_more_rows(service: DSPService,
     assert [c["key"] for c in result["selected"]["filters"]] == ["hp", "lp"]
     assert [c["kind"] for c in result["selected"]["filters"]] == ["hp", "lp"]
     assert [c["title"] for c in result["selected"]["filters"]] == ["High-pass", "Low-pass"]
-    assert result["selected"]["more"] == [{"name": "Limiter", "state": "Off"}, {"name": "Compressor", "state": "Off"},
-                                          {"name": "FIR", "state": "Off"}]
+    assert result["selected"]["more"] == [{"name": "FIR", "state": "Off"}]
+
+
+OUT1 = (True, 0)
+
+
+def dyn_fields(block: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
+    return {name: tuple(f[k] for k in ("value", "min", "max", "step") if k in f) for name, f in block["fields"].items()}
+
+
+def test_an_output_has_limiter_and_compressor_with_the_engines_ranges(service: DSPService, token: str) -> None:
+    selected = state(service, token, selected=OUT1)["selected"]
+    assert dyn_fields(selected["limiter"]) == {
+        "threshold_db": (0.0, -60.0, 20.0, 0.5), "start_time_ms": (0.3, 0.3, 200.0, 0.1),
+        "release_time_ms": (50.0, 50.0, 5000.0, 1.0), "detection_type": (0,)}
+    assert dyn_fields(selected["compressor"]) == {
+        "threshold_db": (0.0, -60.0, 20.0, 0.5), "ratio": (1.0, 1.0, 128.0, 0.1),
+        "start_time_ms": (0.3, 0.3, 200.0, 0.1), "release_time_ms": (50.0, 50.0, 5000.0, 1.0)}
+    assert selected["limiter"]["fields"]["detection_type"]["options"] == [
+        {"value": 0, "label": "Average"}, {"value": 1, "label": "Peak"}]
+    for block in (selected["limiter"], selected["compressor"]):
+        assert (block["enabled"], block["enabled_pending"], block["pending"], block["readonly_reason"]) == (
+            False, False, False, None)
+        assert not any(f["pending"] for f in block["fields"].values())
+
+
+def test_an_input_has_neither_dynamics_block(service: DSPService, token: str) -> None:
+    selected = state(service, token, selected=IN_A)["selected"]
+    assert selected["limiter"] is None
+    assert selected["compressor"] is None
+
+
+def test_a_staged_limiter_threshold_marks_its_field_and_card(service: DSPService, token: str) -> None:
+    key = ControlKey(True, 0, "limiter")
+    service.stage(token, key, replace(controls(service.view(token).draft)[key], threshold_db=-6.0))
+    result = state(service, token, selected=OUT1)
+    limiter = result["selected"]["limiter"]
+    assert result["status"]["pending_count"] == 1
+    assert limiter["pending"] is True
+    assert limiter["enabled_pending"] is False
+    assert {n: f["pending"] for n, f in limiter["fields"].items()} == {
+        "threshold_db": True, "start_time_ms": False, "release_time_ms": False, "detection_type": False}
+    assert limiter["fields"]["threshold_db"]["value"] == -6.0
+    assert result["selected"]["compressor"]["pending"] is False
+
+
+def test_a_factory_disabled_compressor_renders_with_its_stored_values(service: DSPService, token: str) -> None:
+    compressor = state(service, token)["selected"]["compressor"]  # Out 3
+    assert dyn_fields(compressor)["ratio"][0] == 0.0
+    assert dyn_fields(compressor)["threshold_db"][0] == 340.0
+    assert compressor["readonly_reason"] is None
+
+
+def test_a_block_the_engine_refuses_to_write_is_read_only_with_the_reason(service: DSPService, token: str) -> None:
+    limiter = state(service, token)["selected"]["limiter"]  # Out 3's factory limiter keeps a stored ratio
+    assert "unused limiter bytes" in limiter["readonly_reason"]
+    assert limiter["fields"]["threshold_db"]["value"] == 340.0
 
 
 def test_crossover_fields_carry_bounds_and_options(service: DSPService, token: str) -> None:

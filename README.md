@@ -225,8 +225,8 @@ model and has not been checked by measurement on a unit. See
 [docs/UI_GUIDE.md](docs/UI_GUIDE.md).
 
 Not yet in the new UI, and available only with `--classic`: loading programs, presets, measured traces and alignment, FIR coefficient
-backup/restore, and editing the limiter, compressor, FIR and the other
-advanced blocks.
+backup/restore, and editing the FIR and the other advanced blocks. The Limiter and
+Compressor of an output are editable on the Tune screen.
 
 ```sh
 uv run --extra ui sinbosen-la548-ui --classic
