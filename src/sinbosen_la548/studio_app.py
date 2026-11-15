@@ -406,6 +406,16 @@ class _Studio:
         notes = self._notes()
         self._save(replace(notes, nicknames={**notes.nicknames, (output, channel): _text(body, "name")}))
 
+    @staticmethod
+    def _refuse_unwritable_limiters(edits: dict[ControlKey, object], draft: DeviceSettings, letter: str) -> None:
+        """A group never stages a limiter onto a channel whose own limiter the engine will not write."""
+        current = controls(draft)
+        for key, value in edits.items():
+            unwritable = key.block == "limiter" and write_refusal(current[key]) is not None
+            if unwritable and not same_value(value, current[key]):
+                raise ValueError(f"{channel_label(key.output, key.channel)}'s limiter cannot be edited from this app, "
+                                 f"so it cannot take Link {letter}'s limiter. Untick Limiter on Link {letter} first.")
+
     def link(self, body: dict[str, Any]) -> None:
         """Join or create a group. A joining channel takes the group's tied sections as ordinary pending edits; no
         tie-able section is written immediately, so joining never writes to the unit."""
@@ -420,7 +430,9 @@ class _Studio:
             before = next(g for g in notes.links if g.letter == letter)
             if channel not in before.members:
                 draft = self.service.view(self.token).draft
-                self.service.stage_many(self.token, links.join(before, channel, draft))
+                edits = links.join(before, channel, draft)
+                self._refuse_unwritable_limiters(edits, draft, letter)
+                self.service.stage_many(self.token, edits)
         self._save(replace(notes, links=groups))
 
     def unlink(self, body: dict[str, Any]) -> None:
@@ -446,6 +458,7 @@ class _Studio:
         edits: dict[ControlKey, object] = {}
         for member in ordered.members[1:]:
             edits.update(links.join(ordered, member, draft))
+        self._refuse_unwritable_limiters(edits, draft, group.letter)
         self.service.stage_many(self.token, edits)
 
 
