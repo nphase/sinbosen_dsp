@@ -108,7 +108,13 @@ uv run --extra usb sinbosen-la548 dump-group usb backup.bin
 uv run --extra usb sinbosen-la548 set-volume usb 0 -6.0 --verify
 ```
 
-Confirmed on a real LA448: the session, keepalive, lock state, program names
+The front master-volume knob keeps working while connected over USB: the
+client sends no keepalive HandShake there, because that locks the knob until
+the cable is replugged. If the knob ever stops responding, replug the USB
+cable. (A USB link is reported down only when a read or write fails, such as
+after unplugging, not after a quiet spell.)
+
+Confirmed on a real LA448: the session, lock state, program names
 and settings snapshot (it uses the same DA0408X layout), and acknowledged,
 readback-verified writes of mute and gain to their existing values. Not yet
 confirmed over USB: a write that changes a value, and each of the other

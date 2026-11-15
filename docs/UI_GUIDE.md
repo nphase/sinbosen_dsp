@@ -333,7 +333,9 @@ no runtime dependencies. `--demo` documents the default behavior.
 ### Connect, preview, Apply, Live
 
 Enter the DSP IP address, or `usb` for a unit on USB (LA448; needs
-`uv sync --extra usb`), and **Connect**. Connection reads the lock state and
+`uv sync --extra usb`), and **Connect**. Over USB the unit's front master
+knob keeps working while connected; if it ever stops responding, replug the
+USB cable. Connection reads the lock state and
 actual snapshot without changing settings. Unsupported or malformed snapshots
 are refused. The current layout is DA0408X: 4 inputs, 8 outputs, 7 input EQ
 bands, and 15 output EQ bands. This is a validated snapshot layout rather than

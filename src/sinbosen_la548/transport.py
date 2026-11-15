@@ -2,8 +2,9 @@
 
 Owns one link to a single unit - a UDP socket, or a USB HID link (usb.py)
 when the address is `usb` / `usb:<serial>` - runs a background HandShake
-keepalive (180ms send interval / ~6s link timeout), and lets callers do
-simple request/reply exchanges on top.
+keepalive (180ms send interval / ~6s link timeout) over UDP, and lets callers
+do simple request/reply exchanges on top. Over USB there is no keepalive and
+no HandShake at all (see _USB_HANDSHAKE_REFUSAL).
 """
 
 from __future__ import annotations
@@ -30,6 +31,14 @@ QUARANTINE_S = 3.0  # seconds a timed-out request's reply signature stays
 # quarantined (see Transport.request). The only measured late reply, the
 # controlled 0xD9 trial (docs/PROTOCOL.md), arrived 1.548 s after its request,
 # about 1 s after that request's 0.5 s timeout; 3 s leaves ~2x margin.
+
+# Any HandShake (0xA1) over USB locks the unit's front-panel master-volume knob
+# until the cable is replugged (hardware tests, docs/PROTOCOL.md "Keepalive and
+# meter levels"), so a USB link never sends one.
+_USB_HANDSHAKE_REFUSAL = (
+    "refusing to send HAND_SHAKE over USB: HandShake over USB disables the unit's front-panel volume knob "
+    "until the USB cable is replugged; no packet was sent"
+)
 
 
 # Header fields a reply must echo back to count as the match for a request
@@ -89,9 +98,10 @@ class Transport:
 
     def __init__(self, ip: str, port: int = DEFAULT_PORT, *, device_number: int = 0, version: int = 10):
         self._sock: socket.socket | usb.HidLink
+        self._usb = usb.parse_address(ip)[0]
         # What the unit is called to a person: `usb:<serial>` for USB, else the address as given.
         self.address: str
-        if usb.parse_address(ip)[0]:
+        if self._usb:
             # `port` has no meaning over USB. The link reports its own
             # address from recvfrom(), which is what _recv_loop filters on.
             self._sock = usb.open_link(ip)
@@ -165,7 +175,8 @@ class Transport:
         self._recv_thread.start()
 
     def start_keepalive(self) -> None:
-        if self._keepalive_started.is_set():
+        """Start the HandShake keepalive. A no-op over USB, which gets no keepalive."""
+        if self._usb or self._keepalive_started.is_set():
             return
         self._keepalive_started.set()
         self._handshake_thread = threading.Thread(target=self._handshake_loop, daemon=True)
@@ -194,6 +205,7 @@ class Transport:
         self.stop()
 
     def send(self, opcode: Opcode | int, payload: bytes = b"", **kwargs: int) -> None:
+        self._refuse_usb_handshake(opcode)
         frame_bytes = protocol.encode_frame(
             _require_sendable(opcode),
             payload,
@@ -205,14 +217,25 @@ class Transport:
 
     def send_frame(self, frame: Frame) -> None:
         _require_sendable(frame.opcode)
+        self._refuse_usb_handshake(frame.opcode)
         self._send_paced(frame.encode())
+
+    def _refuse_usb_handshake(self, opcode: Opcode | int) -> None:
+        if self._usb and int(opcode) == int(Opcode.HAND_SHAKE):
+            raise ValueError(_USB_HANDSHAKE_REFUSAL)
 
     def _send_paced(self, frame_bytes: bytes) -> None:
         with self._send_lock:
             wait = self._last_send + MIN_SEND_GAP - time.monotonic()
             if wait > 0:
                 time.sleep(wait)
-            self._sock.sendto(frame_bytes, self._addr)
+            try:
+                self._sock.sendto(frame_bytes, self._addr)
+            except OSError:
+                if self._usb:
+                    # An unplugged unit is noticed on the next request at the latest.
+                    self._set_link_up(False)
+                raise
             self._last_send = time.monotonic()
 
     def recv(self, timeout: float = 2.0) -> Frame:
@@ -351,7 +374,9 @@ class Transport:
             self._stop.wait(HANDSHAKE_INTERVAL)
 
     def _check_link_timeout(self) -> None:
-        if self._link_up and (time.monotonic() - self._last_reply) > LINK_TIMEOUT:
+        # A USB link has no keepalive, so silence says nothing; only a failed read or write (_recv_loop,
+        # _send_paced) or stop() takes it down.
+        if not self._usb and self._link_up and (time.monotonic() - self._last_reply) > LINK_TIMEOUT:
             self._set_link_up(False)
 
     def _set_link_up(self, up: bool) -> None:

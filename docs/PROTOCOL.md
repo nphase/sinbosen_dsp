@@ -164,13 +164,47 @@ same reason.
 The client sends `HandShake` (0xA1) every **180 ms** (`HANDSHAKE_INTERVAL`)
 and treats the link as down after **6 s** without a reply
 (`LINK_TIMEOUT`). See `Transport.start_keepalive()` and
-`Transport.link_up`.
+`Transport.link_up`. This is the UDP behaviour; **a USB link sends no
+HandShake at all** (next subsection).
 
 The request is empty. The reply carries a ~60-byte payload that decodes as
 a run of little-endian float32 values; the repeated value seen at rest
 (`00 00 48 c3`) is exactly **-200.0**, a usual metering silence floor. The
 payload is therefore taken to be per-channel signal-meter levels. The
 per-channel byte offsets are not mapped.
+
+#### No keepalive over USB: HandShake locks the front-panel knob
+
+On the LA448 over USB, any `HandShake` (0xA1) disables the unit's front-panel
+master-volume knob until the USB cable is replugged. Hardware tests by the
+owner (2026-11-15, unit serial 6C61B7010730):
+
+| Session did | Knob afterwards |
+|---|---|
+| opened the HID device, sent nothing (40 s) | works |
+| one `READ_LOCK_STATE` (0xB6), then silence | works |
+| one `READ_GROUP` (0xA9), full 2464-byte reply, then silence | works |
+| `READ_LOCK_STATE` + `READ_GROUP` + one 0xA4 gain write (acked, readback identical), no HandShake, 40 s | works |
+| `HandShake` (0xA1) only, every 180 ms | dead until replug |
+| the manufacturer app's header on `HandShake` (channel_type 3, version 15) | dead until replug |
+
+Stopping the HandShakes or closing the device does not release the lock; only a
+replug does. Reads and writes work without any HandShake. The client therefore
+sends none over USB: `start_keepalive()` is a no-op, and `Transport` refuses
+to send a 0xA1 frame at all on a USB link (`send`, `send_frame`, `request`).
+There is no keepalive reply stream to time out on, so `LINK_TIMEOUT` does not
+apply to USB. A USB link is up from its first valid reply until a HID read or
+write raises `OSError` (what an unplugged cable produces: `OSError: read
+error`) or `stop()`; a failed send reports the link down too, so an unplugged
+unit is noticed on the next request at the latest. UDP behaviour is unchanged.
+
+There is no master-volume command: none in the protocol, the manufacturer's
+app, or its central-control codes (all checked), and the knob's value is not
+readable from the unit.
+
+Not known: whether the manufacturer's Windows app shows the same lockout, and
+whether the LA548 over UDP is affected (its keepalive has always run, and no
+knob test was done).
 
 ### Connect sequence
 
@@ -207,8 +241,10 @@ The LA448 carries the same application command protocol over its USB port
   `0x0A` / `0x13`). Replies are not matched on that byte.
 - `READ_LOCK_STATE`, `HAND_SHAKE` (60-byte meter payload, as on the LA548),
   `GET_USER_NAME` (750 bytes) and `READ_GROUP` (2464 bytes) all answer, and
-  the snapshot decodes with the DA0408X profile. With the 180 ms keepalive
-  running the link stayed up for 10 s and no frame was rejected.
+  the snapshot decodes with the DA0408X profile. With a 180 ms HandShake
+  running the link stayed up for 10 s and no frame was rejected, but that
+  HandShake locks the front-panel knob, so the client no longer sends it
+  over USB (see "No keepalive over USB" under "Keepalive and meter levels").
 - `WRITE_MODULE_ID` is acknowledged: input 1's mute and gain were each
   written with their existing value, readback matched, and the whole
   snapshot was byte-identical before and after.

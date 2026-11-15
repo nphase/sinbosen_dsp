@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from sinbosen_la548 import protocol, usb
+from sinbosen_la548 import transport as transport_module
 from sinbosen_la548.protocol import Frame, Opcode
 from sinbosen_la548.transport import _RECV_BUFFER_SIZE, LINK_TIMEOUT, QUARANTINE_S, Transport, _may_collide
 
@@ -677,5 +678,142 @@ def test_hostname_starting_with_usb_still_resolves_as_a_network_host(monkeypatch
     try:
         assert resolved == ["usbhost.local"]
         assert t._addr == ("127.0.0.1", 8087)
+    finally:
+        t.stop()
+
+
+# --- USB sessions send no keep-alive: any HandShake locks the unit's front-panel knob until replug ---
+
+
+class _UsbDevice(_ReplyingHidDevice):
+    """Fake hidapi device that can start failing its reads or writes."""
+
+    def __init__(self) -> None:
+        super().__init__(protocol.encode_frame(Opcode.READ_LOCK_STATE, b"\x000000", version=0x0F).ljust(64, b"\x00"))
+        self.fail_reads = False
+        self.fail_writes = False
+
+    def write(self, data: bytes) -> int:
+        if self.fail_writes:
+            return -1  # what hidapi returns for a write to an unplugged device
+        return super().write(data)
+
+    def read(self, max_length: int, timeout_ms: int = 0) -> list[int]:
+        if self.fail_reads:
+            raise OSError("read error")
+        return super().read(max_length, timeout_ms)
+
+
+def _usb_transport(monkeypatch: pytest.MonkeyPatch) -> tuple[Transport, _UsbDevice]:
+    device = _UsbDevice()
+    monkeypatch.setattr(usb, "open_link", lambda address: usb.HidLink(device, "usb:6C61B7010730"))
+    return Transport("usb"), device
+
+
+def _written_opcodes(device: _ReplyingHidDevice) -> list[int]:
+    return [report[1 + 5] for report in device.written]  # report ID byte, then the opcode at frame offset 5
+
+
+def test_usb_session_sends_no_handshake_while_udp_still_does(monkeypatch):
+    monkeypatch.setattr(transport_module, "HANDSHAKE_INTERVAL", 0.01)
+    t, device = _usb_transport(monkeypatch)
+    t.start()
+    try:
+        t.request(Opcode.READ_LOCK_STATE, timeout=1.0)
+        t.start_keepalive()
+        time.sleep(0.15)  # many keep-alive intervals
+        assert t._handshake_thread is None
+        assert _written_opcodes(device) == [Opcode.READ_LOCK_STATE]
+    finally:
+        t.stop()
+
+    udp = _make_transport()
+    sent: list[bytes] = []
+    udp._sock.sendto = lambda data, addr: sent.append(data)  # type: ignore[method-assign]
+    udp.start_keepalive()
+    try:
+        time.sleep(0.15)
+    finally:
+        udp.stop()
+    assert sent and all(data[5] == Opcode.HAND_SHAKE for data in sent)
+
+
+def test_usb_link_stays_up_past_the_link_timeout_but_udp_goes_down(monkeypatch):
+    monkeypatch.setattr(transport_module, "LINK_TIMEOUT", 0.05)
+    t, _ = _usb_transport(monkeypatch)
+    t.start()
+    try:
+        t.request(Opcode.READ_LOCK_STATE, timeout=1.0)
+        assert t.link_up
+        time.sleep(0.3)  # several recv-loop passes, all past the timeout
+        assert t.link_up
+    finally:
+        t.stop()
+
+    udp = _make_transport()
+    udp._set_link_up(True)
+    time.sleep(0.1)
+    udp._check_link_timeout()
+    assert udp.link_up is False
+
+
+def test_usb_link_goes_down_when_the_read_fails(monkeypatch):
+    t, device = _usb_transport(monkeypatch)
+    changes: list[bool] = []
+    t.on_link_change(changes.append)
+    t.start()
+    try:
+        t.request(Opcode.READ_LOCK_STATE, timeout=1.0)
+        device.fail_reads = True
+        deadline = time.monotonic() + 1.0
+        while t.link_up and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert t.link_up is False
+        assert changes == [True, False]
+    finally:
+        t.stop()
+
+
+def test_usb_link_goes_down_when_a_send_fails(monkeypatch):
+    t, device = _usb_transport(monkeypatch)
+    changes: list[bool] = []
+    t.on_link_change(changes.append)
+    t.start()
+    try:
+        t.request(Opcode.READ_LOCK_STATE, timeout=1.0)
+        device.fail_writes = True
+        with pytest.raises(OSError):
+            t.send(Opcode.READ_LOCK_STATE)
+        assert t.link_up is False
+        assert changes == [True, False]
+    finally:
+        t.stop()
+
+
+def test_a_udp_send_failure_does_not_change_the_link_state():
+    t = _make_transport()
+    t._set_link_up(True)
+
+    def fail(data: bytes, addr: object) -> None:
+        raise OSError("network unreachable")
+
+    t._sock.sendto = fail  # type: ignore[method-assign]
+    with pytest.raises(OSError):
+        t.send(Opcode.READ_LOCK_STATE)
+    assert t.link_up is True
+
+
+@pytest.mark.parametrize("how", ["send", "send_frame", "request"])
+def test_handshake_over_usb_is_refused_and_sends_nothing(monkeypatch, how: str):
+    t, device = _usb_transport(monkeypatch)
+    try:
+        with pytest.raises(ValueError, match=r"HandShake over USB disables the unit's front-panel volume knob"):
+            if how == "send":
+                t.send(Opcode.HAND_SHAKE)
+            elif how == "send_frame":
+                t.send_frame(Frame(opcode=Opcode.HAND_SHAKE))
+            else:
+                t.request(Opcode.HAND_SHAKE, timeout=0.1)
+        assert device.written == []
     finally:
         t.stop()
