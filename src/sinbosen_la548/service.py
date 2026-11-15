@@ -252,10 +252,9 @@ def _finite_values(value: object) -> None:
 
 
 def _check_unused(value: object) -> None:
+    # The limiter's unused ratio slot (raw bytes 6:8) is not checked: a limiter write sends it as 0 (docs/PROTOCOL.md).
     if isinstance(value, (CompressorSettings, ExpanderSettings)) and value.raw and value.raw[9] != 0:
         raise ValueError("cannot preserve unused dynamics bytes through the current write API")
-    if isinstance(value, LimiterSettings) and value.raw and value.raw[6:8] != b"\x00\x00":
-        raise ValueError("cannot preserve unused limiter bytes through the current write API")
 
 
 def write_refusal(value: object) -> str | None:

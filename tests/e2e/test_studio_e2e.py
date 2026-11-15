@@ -7,6 +7,7 @@ reaches hardware either. These fixtures are separate from the Gradio ones in con
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import re
@@ -1474,15 +1475,50 @@ def test_a_factory_disabled_compressor_shows_its_values_and_enabling_it_stages_v
     studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for(state="detached")
 
 
-def test_a_block_the_engine_refuses_to_write_is_read_only_with_its_reason(studio: Studio) -> None:
+def test_the_factory_limiter_is_editable(studio: Studio) -> None:
     studio.select("Out 3")
     card = _dynamics_card(studio, "Limiter")
-    assert card.locator(".card-note").inner_text() == ("This limiter holds data the app cannot write back safely, "
-                                                        "so it is shown read-only.")
+    assert not card.locator(".card-note").count()
+    assert studio.field("Limiter threshold").input_value() == "340.0 dB"
+    field = studio.field("Limiter release")
+    field.fill("200")
+    field.press("Enter")
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for()
+    studio.until("Limiter threshold", "value", "20.0 dB")
+    assert studio.border("Limiter threshold") == PENDING_BORDER
+    studio.page.get_by_role("button", name="Apply", exact=True).click()
+    studio.unapplied().get_by_text("1 unapplied", exact=True).wait_for(state="detached")
+
+
+@pytest.fixture
+def studio_with_unwritable_compressor(tmp_path: Path) -> Iterator[Studio]:
+    """Out 3's compressor stores a non-zero unused detection byte, which the engine will not write back."""
+    from sinbosen_la548.service import DSPService, demo_settings
+
+    settings = demo_settings()
+    key = ControlKey(True, 2, "compressor")
+    compressor = controls_of(settings)[key]
+    settings = replace_control(settings, key, dataclasses.replace(compressor, raw=compressor.raw[:9] + b"\x05"))
+    yield from _serve(tmp_path, DSPService(settings))
+
+
+def controls_of(settings: Any) -> dict[Any, Any]:
+    from sinbosen_la548.service import controls
+
+    return controls(settings)
+
+
+def test_a_block_the_engine_refuses_to_write_is_read_only_with_its_reason(
+        studio_with_unwritable_compressor: Studio) -> None:
+    studio = studio_with_unwritable_compressor
+    studio.select("Out 3")
+    card = _dynamics_card(studio, "Compressor")
+    assert card.locator(".card-note").inner_text() == ("This compressor holds data the app cannot write back "
+                                                        "safely, so it is shown read-only.")
     assert card.get_by_role("checkbox").is_disabled()
-    assert studio.field("Limiter threshold").is_disabled()
-    assert studio.field("Limiter detection").is_disabled()
-    assert not _dynamics_card(studio, "Compressor").locator(".card-note").count()
+    assert studio.field("Compressor threshold").is_disabled()
+    assert studio.field("Compressor ratio").is_disabled()
+    assert not _dynamics_card(studio, "Limiter").locator(".card-note").count()
 
 
 def test_dynamics_edits_send_nothing_off_loopback(studio: Studio) -> None:

@@ -1007,6 +1007,14 @@ All three: attack 0.3-200 ms, release 50-5000 ms. Unused fields are sent
 as 0 (the limiter has no ratio control; the compressor and expander have
 no detection type).
 
+A factory limiter stores a non-zero value in its unused ratio slot (bytes 6-7,
+`0x0080` in the demo snapshot taken from a unit). Writing a limiter sends that
+slot as 0, as above, so the first write replaces the stored bytes; later
+readbacks show zeros there. The studio UI and the service therefore accept such
+a limiter (the compressor's and expander's unused detection byte, offset 9,
+is still refused when non-zero). That a zeroed ratio slot is harmless has not
+been separately confirmed on the LA448.
+
 Topology matches the settings layout: the output block has a compressor
 and a limiter, the input block has an expander and neither of the others.
 A compressor write addressed to an input (`channel_type=0`) never reaches

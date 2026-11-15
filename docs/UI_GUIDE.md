@@ -184,12 +184,12 @@ whole ms, attack in 0.1 ms up to 1 ms and whole ms beyond). A disabled
 compressor on a factory unit stores values the unit would refuse (a ratio of 0
 and a threshold of +340 dB); the card shows them as stored, and enabling or
 editing it moves each stored value that is outside its range to the nearest
-allowed one and shows those as unapplied. If the unit's stored bytes for a
-block cannot be preserved by a write (as with a factory limiter on some
-channels), its card is read-only and says so. A limiter edit follows a link
-group that ties **Limiter**, but only the fields you edited reach the other members,
-whose own settings stay as they are; it is refused if a member's limiter is
-read-only. The compressor is never linked. Neither block is
+allowed one and shows those as unapplied; a factory limiter, which also stores
+a +340 dB threshold, is edited the same way. A limiter write sends the unit's
+unused ratio slot as 0. If the unit's stored bytes for a block cannot be
+preserved by a write (a compressor with a non-zero unused detection byte), its
+card is read-only and says so. A limiter edit follows a link
+group that ties **Limiter**. The compressor is never linked. Neither block is
 drawn on the plot, as their effect depends on the signal level, and neither
 changes the latency readout. The FIR stays a row below, showing On or Off (an
 input has only the FIR, and no limiter or compressor).

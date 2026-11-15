@@ -1117,11 +1117,22 @@ def test_an_input_has_no_dynamics_block_to_edit(client: TestClient, kind: str) -
     assert client.get("/api/state").json()["status"]["pending_count"] == 0
 
 
-def test_a_block_the_engine_refuses_to_write_cannot_be_edited(client: TestClient) -> None:
-    response = client.post("/api/edit", json={"id": "out:2", "kind": "limiter", "field": "enabled", "value": True})
-    assert response.status_code == 400
-    assert "unused limiter bytes" in response.json()["error"]
-    assert client.get("/api/state").json()["status"]["pending_count"] == 0
+def test_a_factory_limiter_with_stored_unused_bytes_is_editable(client: TestClient) -> None:
+    state = post(client, "/api/select", id="out:2")
+    assert dynamics(state, "limiter")["readonly_reason"] is None
+    state = post(client, "/api/edit", id="out:2", kind="limiter", field="threshold_db", value=-6.0)
+    assert state["status"]["pending_count"] == 1
+    assert dynamics(state, "limiter")["fields"]["threshold_db"]["value"] == -6.0
+    assert dynamics(state, "limiter")["pending"] is True
+
+
+def test_editing_the_factory_limiter_clamps_the_stored_fields_that_were_not_typed(client: TestClient) -> None:
+    post(client, "/api/select", id="out:2")
+    state = post(client, "/api/edit", id="out:2", kind="limiter", field="detection_type", value=1)
+    block = dynamics(state, "limiter")
+    assert (block["fields"]["detection_type"]["value"], block["fields"]["threshold_db"]["value"],
+            block["fields"]["threshold_db"]["pending"]) == (1, 20.0, True)
+    assert state["status"]["pending_count"] == 1
 
 
 def _link_outputs(client: TestClient, sections: list[str]) -> None:
@@ -1225,35 +1236,32 @@ def test_a_linked_multi_field_limiter_edit_carries_exactly_those_fields(client: 
                                             "release_time_ms": 50.0, "detection_type": 1}
 
 
-def test_a_linked_limiter_edit_is_refused_when_a_member_cannot_be_written(client: TestClient) -> None:
+def test_a_linked_limiter_edit_reaches_a_factory_limiter_on_a_member(client: TestClient) -> None:
     post(client, "/api/link", id="out:0", letter=None)
     post(client, "/api/link", id="out:2", letter="A")
-    post(client, "/api/link/sections", letter="A", sections=["crossover", "eq", "delay", "limiter"])
-    post(client, "/api/revert")  # joining staged the group's crossover and EQ on Out 3
-    response = client.post("/api/edit", json={"id": "out:0", "kind": "limiter", "field": "threshold_db",
-                                              "value": -6.0})
-    assert response.status_code == 400
-    assert response.json()["error"] == ("Out 3's limiter cannot be edited from this app, so a linked limiter change "
-                                        "is refused. Untick Limiter on Link A to edit Out 1 alone.")
-    state = client.get("/api/state").json()
-    assert state["status"]["pending_count"] == 0
-    # Without the tie the same edit is fine, and Out 3's limiter is never written.
-    post(client, "/api/link/sections", letter="A", sections=["crossover", "eq", "delay"])
-    assert post(client, "/api/edit", id="out:0", kind="limiter", field="threshold_db",
-                value=-6.0)["status"]["pending_count"] == 1
+    post(client, "/api/link/sections", letter="A", sections=["limiter"])
+    post(client, "/api/revert")
+    state = post(client, "/api/edit", id="out:0", kind="limiter", field="threshold_db", value=-6.0)
+    assert state["status"]["pending_count"] == 2
+    assert _limiter_of(client, "out:2")["threshold_db"] == -6.0
 
 
-def test_apply_never_writes_a_read_only_limiter_through_a_link(store: StudioStore) -> None:
+def test_apply_writes_a_factory_limiter_and_clears_it(store: StudioStore) -> None:
     device = FakeDevice()
+
+    def write(channel: int, **kwargs: Any) -> None:
+        key = ControlKey(True, channel, "limiter")
+        block = type(controls(device.settings)[key])
+        device.settings = replace_control(device.settings, key, block(**kwargs, raw=b"\x00" * 10))  # ratio bytes zero
+
+    device.client.set_limiter.side_effect = write
     with connected(store, device) as client:
-        post(client, "/api/link", id="out:0", letter=None)
-        post(client, "/api/link", id="out:2", letter="A")
-        post(client, "/api/link/sections", letter="A", sections=["limiter"])
-        post(client, "/api/revert")
-        assert client.post("/api/edit", json={"id": "out:0", "kind": "limiter", "field": "threshold_db",
-                                              "value": -6.0}).status_code == 400
-        assert post(client, "/api/apply")["result"]["ok"] is True
-    device.client.set_limiter.assert_not_called()
+        post(client, "/api/edit", id="out:2", kind="limiter", values={"threshold_db": -6.0, "enabled": True})
+        state = post(client, "/api/apply")
+    assert state["result"]["ok"] is True
+    assert state["status"]["pending_count"] == 0
+    device.client.set_limiter.assert_called_once()
+    assert device.client.set_limiter.call_args.kwargs["threshold_db"] == -6.0
 
 
 # Joining a group that ties the limiter
@@ -1270,32 +1278,3 @@ def test_a_channel_joining_a_group_takes_the_limiter_when_its_own_can_be_written
     state = post(client, "/api/link", id="out:1", letter="A")
     assert state["status"]["pending_count"] == 1
     assert _limiter_of(client, "out:1")["threshold_db"] == -8.0
-
-
-def test_a_channel_with_a_read_only_limiter_cannot_join_a_group_tying_the_limiter(client: TestClient) -> None:
-    _out_1_group_tying_the_limiter(client)
-    response = client.post("/api/link", json={"id": "out:2", "letter": "A"})
-    assert response.status_code == 400
-    assert response.json()["error"] == ("Out 3's limiter cannot be edited from this app, so it cannot take Link A's "
-                                        "limiter. Untick Limiter on Link A first.")
-    state = client.get("/api/state").json()
-    assert state["status"]["pending_count"] == 0
-    assert channel(state, "out:2")["link"] is None
-    assert [m["id"] for m in post(client, "/api/select", id="out:0")["selected"]["link"]["members"]] == ["out:0"]
-
-
-def test_a_read_only_limiter_can_join_a_group_that_does_not_tie_the_limiter(client: TestClient) -> None:
-    _out_1_group_tying_the_limiter(client)
-    post(client, "/api/link/sections", letter="A", sections=["delay"])
-    assert channel(post(client, "/api/link", id="out:2", letter="A"), "out:2")["link"]["letter"] == "A"
-
-
-def test_copy_from_refuses_a_member_whose_limiter_is_read_only(client: TestClient) -> None:
-    post(client, "/api/link", id="out:0", letter=None)
-    post(client, "/api/link", id="out:2", letter="A")
-    post(client, "/api/revert")
-    post(client, "/api/link/sections", letter="A", sections=["limiter"])
-    response = client.post("/api/link/sync", json={"letter": "A", "from": "out:0"})
-    assert response.status_code == 400
-    assert "Out 3's limiter cannot be edited" in response.json()["error"]
-    assert client.get("/api/state").json()["status"]["pending_count"] == 0

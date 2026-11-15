@@ -9,7 +9,15 @@ import pytest
 
 from sinbosen_la548.client import Client, LockState
 from sinbosen_la548.protocol import Opcode
-from sinbosen_la548.service import ControlKey, DSPService, controls, demo_settings, normalize_control, replace_control
+from sinbosen_la548.service import (
+    ControlKey,
+    DSPService,
+    controls,
+    demo_settings,
+    normalize_control,
+    replace_control,
+    same_value,
+)
 from sinbosen_la548.settings import decode_settings
 
 
@@ -488,6 +496,46 @@ def test_unused_advanced_fields_cannot_be_overwritten(rig):
     comp = replace(comp, raw=comp.raw[:9] + b"\x05")
     with pytest.raises(ValueError, match="unused"):
         normalize_control(ControlKey(True, 0, "compressor"), comp)
+
+
+def _limiter_with_stored_ratio_bytes(settings, channel=0):
+    key = ControlKey(True, channel, "limiter")
+    limiter = controls(settings)[key]
+    return replace_control(settings, key, replace(limiter, raw=limiter.raw[:6] + b"\x80\x00" + limiter.raw[8:]))
+
+
+def test_a_limiter_with_stored_unused_ratio_bytes_is_written_with_them_zeroed_and_verifies(rig):
+    service, token, device = rig
+    device.settings = _limiter_with_stored_ratio_bytes(device.settings)
+    key = ControlKey(True, 0, "limiter")
+
+    def write(channel, **kwargs):
+        block = type(controls(device.settings)[key])
+        device.writes.append((key, kwargs))
+        # The unit now holds zeros in the unused slot, as the write sends them.
+        device.settings = replace_control(device.settings, key, block(**kwargs, raw=b"\x00" * 10))
+
+    device.client.set_limiter.side_effect = write
+    service.connect(token, "127.0.0.1")
+    block = service.view(token).draft.outputs[0].limiter
+    assert block.raw[6:8] == b"\x80\x00"
+    service.stage(token, key, replace(block, threshold_db=-12.0, enabled=True))
+    assert len(service.view(token).pending) == 1
+    result = service.apply(token)
+    assert result.verified and not result.errors and not result.pending
+    assert result.applied == (key,)
+    assert device.writes[0][1]["threshold_db"] == -12.0
+    assert service.view(token).pending == ()
+    assert same_value(block, replace(block, raw=b"\x00" * 10))
+
+
+def test_a_limiter_edit_that_changes_only_unused_bytes_is_not_pending(rig):
+    service, token, device = rig
+    device.settings = _limiter_with_stored_ratio_bytes(device.settings)
+    service.connect(token, "127.0.0.1")
+    block = service.view(token).draft.outputs[0].limiter
+    service.stage(token, ControlKey(True, 0, "limiter"), replace(block, raw=b"\x00" * 10))
+    assert service.view(token).pending == ()
 
 
 def test_reads_and_writes_are_serialized(rig):

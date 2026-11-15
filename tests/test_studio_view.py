@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from sinbosen_la548.fir_adapter import FIRParameters
-from sinbosen_la548.service import ControlKey, DSPService, controls, demo_settings
+from sinbosen_la548.service import ControlKey, DSPService, controls, demo_settings, replace_control
 from sinbosen_la548.studio_store import SECTIONS, DeviceNotes, LinkGroup
 from sinbosen_la548.studio_view import LINK_COLOURS, Stage, build_state, fir_latency_ms, path_latency
 from sinbosen_la548.tuning import band_in_use
@@ -146,11 +146,22 @@ def test_a_factory_disabled_compressor_renders_with_its_stored_values(service: D
     assert compressor["readonly_reason"] is None
 
 
-def test_a_block_the_engine_refuses_to_write_is_read_only_with_the_reason(service: DSPService, token: str) -> None:
+def test_the_factory_limiter_is_not_read_only(service: DSPService, token: str) -> None:
     limiter = state(service, token)["selected"]["limiter"]  # Out 3's factory limiter keeps a stored ratio
-    assert limiter["readonly_reason"] == ("This limiter holds data the app cannot write back safely, so it is "
-                                          "shown read-only.")
+    assert limiter["readonly_reason"] is None
     assert limiter["fields"]["threshold_db"]["value"] == 340.0
+
+
+def test_a_block_the_engine_still_refuses_to_write_is_read_only_with_the_reason() -> None:
+    settings = demo_settings()
+    key = ControlKey(True, 2, "compressor")
+    compressor = controls(settings)[key]
+    settings = replace_control(settings, key, replace(compressor, raw=compressor.raw[:9] + b"\x05"))
+    service = DSPService(settings)
+    result = state(service, service.new_session())["selected"]
+    assert result["compressor"]["readonly_reason"] == ("This compressor holds data the app cannot write back safely, "
+                                                       "so it is shown read-only.")
+    assert result["limiter"]["readonly_reason"] is None
 
 
 def test_crossover_fields_carry_bounds_and_options(service: DSPService, token: str) -> None:

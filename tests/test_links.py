@@ -190,3 +190,12 @@ def test_with_sections_replaces_the_tied_sections() -> None:
         links.with_sections(groups, "C", ALL)
     with pytest.raises(ValueError):
         links.with_sections(groups, "A", frozenset({"mute"}))
+
+
+def test_limiters_that_differ_only_in_unused_bytes_are_in_sync() -> None:
+    settings = demo_settings()
+    key = ControlKey(True, 4, "limiter")
+    limiter = controls(settings)[key]
+    other = replace_control(settings, key, replace(limiter, raw=limiter.raw[:6] + b"\x00\x00" + limiter.raw[8:]))
+    assert limiter.raw[6:8] != b"\x00\x00"
+    assert links.in_sync(group(sections=frozenset({"limiter"})), other)

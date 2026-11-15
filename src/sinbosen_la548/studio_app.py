@@ -32,7 +32,6 @@ from .service import (
     controls,
     demo_settings,
     same_value,
-    write_refusal,
 )
 from .settings import CrossoverSettings, DeviceSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
@@ -296,10 +295,6 @@ class _Studio:
         """Add to `edits` the typed fields on each other member's own block; refuse if a member's cannot be written."""
         channel = key.channel
         for member in (m for m in group.members if m != channel):
-            if write_refusal(controls(draft)[replace(key, channel=member)]) is not None:
-                raise ValueError(f"{channel_label(True, member)}'s limiter cannot be edited from this app, so a "
-                                 f"linked limiter change is refused. Untick Limiter on Link {group.letter} to edit "
-                                 f"{channel_label(True, channel)} alone.")
             member_key, member_block = self.tuning.dynamics_edit(self.token, member, kind, typed)
             if not same_value(member_block, controls(draft)[member_key]):
                 edits[member_key] = member_block
@@ -406,16 +401,6 @@ class _Studio:
         notes = self._notes()
         self._save(replace(notes, nicknames={**notes.nicknames, (output, channel): _text(body, "name")}))
 
-    @staticmethod
-    def _refuse_unwritable_limiters(edits: dict[ControlKey, object], draft: DeviceSettings, letter: str) -> None:
-        """A group never stages a limiter onto a channel whose own limiter the engine will not write."""
-        current = controls(draft)
-        for key, value in edits.items():
-            unwritable = key.block == "limiter" and write_refusal(current[key]) is not None
-            if unwritable and not same_value(value, current[key]):
-                raise ValueError(f"{channel_label(key.output, key.channel)}'s limiter cannot be edited from this app, "
-                                 f"so it cannot take Link {letter}'s limiter. Untick Limiter on Link {letter} first.")
-
     def link(self, body: dict[str, Any]) -> None:
         """Join or create a group. A joining channel takes the group's tied sections as ordinary pending edits; no
         tie-able section is written immediately, so joining never writes to the unit."""
@@ -430,9 +415,7 @@ class _Studio:
             before = next(g for g in notes.links if g.letter == letter)
             if channel not in before.members:
                 draft = self.service.view(self.token).draft
-                edits = links.join(before, channel, draft)
-                self._refuse_unwritable_limiters(edits, draft, letter)
-                self.service.stage_many(self.token, edits)
+                self.service.stage_many(self.token, links.join(before, channel, draft))
         self._save(replace(notes, links=groups))
 
     def unlink(self, body: dict[str, Any]) -> None:
@@ -458,7 +441,6 @@ class _Studio:
         edits: dict[ControlKey, object] = {}
         for member in ordered.members[1:]:
             edits.update(links.join(ordered, member, draft))
-        self._refuse_unwritable_limiters(edits, draft, group.letter)
         self.service.stage_many(self.token, edits)
 
 
