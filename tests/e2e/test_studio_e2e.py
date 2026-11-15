@@ -1543,3 +1543,16 @@ def test_a_linked_edit_changes_only_the_edited_field_on_the_other_member(studio:
     studio.select("Out 4")
     assert studio.field("High-pass frequency").input_value() == "120"
     assert studio.field("High-pass family").evaluate("el => el.selectedOptions[0].text") == "Linkwitz"
+
+
+def test_a_linked_edit_names_the_member_it_could_not_change(studio: Studio) -> None:
+    _api(studio, "/api/link", {"id": "out:0", "letter": None})
+    _api(studio, "/api/link", {"id": "out:2", "letter": "A"})
+    _api(studio, "/api/link/sections", {"letter": "A", "sections": ["limiter"]})
+    _api(studio, "/api/revert", {})
+    field = studio.field("Limiter release")
+    field.fill("300")
+    with studio.page.expect_response("**/api/edit"):
+        field.press("Enter")
+    notice = studio.page.locator("#hint .message.notice")
+    notice.get_by_text("Not changed on Out 3: its limiter has never been set up. Set it there first.").wait_for()

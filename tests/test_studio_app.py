@@ -1462,3 +1462,57 @@ def test_a_compressor_the_engine_refuses_to_write_is_a_400_with_nothing_staged(s
         assert response.status_code == 400
         assert "unused dynamics bytes" in response.json()["error"]
         assert client.get("/api/state").json()["status"]["pending_count"] == 0
+
+
+# A member's own edit decides what a typed field implies on it, and skipped members are reported
+
+def _bands_linked(client: TestClient, source: dict[str, Any], member: dict[str, Any]) -> None:
+    post(client, "/api/edit", id="out:0", kind="eq", index=2, values=source)
+    post(client, "/api/edit", id="out:1", kind="eq", index=2, values=member)
+    post(client, "/api/apply")
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:1", letter="A")
+    post(client, "/api/revert")
+
+
+def test_a_type_edit_leaves_a_members_band_with_the_resets_its_own_edit_implies(client: TestClient) -> None:
+    _bands_linked(client, {"enabled": True, "type": 4}, {"enabled": True, "gain_db": 6.0})
+    state = post(client, "/api/edit", id="out:0", kind="eq", index=2, field="type", value=4)
+    member = _band(client, "out:1", 2)
+    assert member is not None and (member["type"], member["gain_db"]) == (4, 0.0)
+    assert state["status"]["pending_count"] == 1
+    # The pinned gain is not a stuck state: a direct edit of it is refused, and a frequency edit works.
+    assert client.post("/api/edit", json={"id": "out:1", "kind": "eq", "index": 2, "field": "gain_db",
+                                          "value": 0.0}).status_code == 400
+
+
+def test_a_type_edit_keeps_the_members_own_gain_when_the_new_type_has_one(client: TestClient) -> None:
+    _bands_linked(client, {"enabled": True, "gain_db": 2.0}, {"enabled": True, "gain_db": 6.0})
+    post(client, "/api/edit", id="out:0", kind="eq", index=2, field="type", value=1)
+    member = _band(client, "out:1", 2)
+    assert member is not None and (member["type"], member["gain_db"]) == (1, 6.0)
+
+
+def test_in_sync_members_still_end_identical_after_a_type_edit(client: TestClient) -> None:
+    post(client, "/api/link", id="out:3", letter=None)
+    post(client, "/api/link", id="out:4", letter="A")
+    post(client, "/api/revert")
+    post(client, "/api/edit", id="out:3", kind="eq", index=1, values={"enabled": True, "gain_db": 3.0})
+    post(client, "/api/edit", id="out:3", kind="eq", index=1, field="type", value=4)
+    post(client, "/api/edit", id="out:3", kind="eq", index=1, field="type", value=2)
+    assert _band(client, "out:3", 1) == _band(client, "out:4", 1)
+
+
+def test_a_linked_edit_says_which_member_could_not_take_a_field(client: TestClient) -> None:
+    _bands_linked(client, {"enabled": True}, {"enabled": True, "type": 4})
+    state = post(client, "/api/edit", id="out:0", kind="eq", index=2, field="gain_db", value=4.0)
+    assert state["notice"] == "Gain not changed on Out 2: band 3 is an all-pass."
+    assert post(client, "/api/edit", id="out:0", kind="eq", index=2, field="freq_hz", value=900)["notice"] is None
+
+
+def test_a_linked_edit_says_which_member_holds_a_limiter_that_was_never_set_up(client: TestClient) -> None:
+    _out_1_limiter_on_at_minus_8_linked_with_the_factory_out_3(client)
+    state = post(client, "/api/edit", id="out:0", kind="limiter", field="release_time_ms", value=300.0)
+    assert state["notice"] == "Not changed on Out 3: its limiter has never been set up. Set it there first."
+    assert post(client, "/api/edit", id="out:0", kind="limiter", values={"threshold_db": -6.0,
+                                                                          "release_time_ms": 300.0})["notice"] is None

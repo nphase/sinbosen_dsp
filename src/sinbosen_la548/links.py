@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from string import ascii_uppercase
-from typing import Any
 
-from .service import ControlKey, controls, normalize_control, same_value
+from .service import ControlKey, controls, same_value
 from .settings import DeviceSettings
 from .studio_store import SECTIONS, LinkGroup
 
@@ -44,33 +43,14 @@ def expand(groups: Sequence[LinkGroup], settings: DeviceSettings,
     return result
 
 
-def expand_fields(groups: Sequence[LinkGroup], settings: DeviceSettings, key: ControlKey, after: object,
-                  updates: dict[str, Any] | None,
-                  accept: Callable[[ControlKey, dict[str, Any]], dict[str, Any]] = lambda key, fields: fields,
-                  ) -> dict[ControlKey, object]:
-    """The edit of `key` as it reaches every other member of a group tying its section: only the `updates` fields
-    (those the user typed), set on the member's own current block at the same key; `after` itself for a single value
-    such as a delay. `accept` may drop fields a member's own block would refuse. Members that differ keep their other
-    fields, and a member whose block could not be encoded with the fields set is left out."""
+def tied_targets(groups: Sequence[LinkGroup], settings: DeviceSettings, key: ControlKey) -> list[ControlKey]:
+    """The same control on every other member of a group tying the key's section, where the member has it."""
     group = tied_group(groups, key)
     if group is None:
-        return {}
-    available: dict[ControlKey, Any] = controls(settings)
-    result: dict[ControlKey, object] = {}
-    for member in (m for m in group.members if m != key.channel):
-        target = replace(key, channel=member)
-        if target not in available:
-            continue
-        if updates is None:
-            result[target] = after
-            continue
-        value = replace(available[target], **accept(target, updates))
-        try:
-            normalize_control(target, value)
-        except ValueError:
-            continue
-        result[target] = value
-    return result
+        return []
+    available = controls(settings)
+    return [target for member in group.members if member != key.channel
+            if (target := replace(key, channel=member)) in available]
 
 
 def tied_group(groups: Sequence[LinkGroup], key: ControlKey) -> LinkGroup | None:

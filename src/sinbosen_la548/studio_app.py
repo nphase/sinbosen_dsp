@@ -31,19 +31,21 @@ from .service import (
     DSPService,
     controls,
     demo_settings,
+    normalize_control,
     same_value,
 )
 from .settings import CrossoverSettings, DeviceSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import build_state, channel_label
-from .tuning import ALLPASS_TYPES, EQ_TYPES, TuningController, band_in_use, cleared_band
+from .tuning import EQ_TYPES, TuningController, band_in_use, cleared_band
 
 LOG = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).with_name("web")
 DEMO_DEVICE_KEY = "demo"
 FLUSH_INTERVAL_S = 0.25
 MAX_REW_BYTES = 256 * 1024
-EQ_FIELDS = frozenset({"freq_hz", "gain_db", "q", "type", "enabled"})  # what `TuningController.eq_edit` takes
+FIELD_WORDS = {"freq_hz": "Frequency", "gain_db": "Gain", "q": "Q", "type": "Type", "enabled": "Enable",
+               "filter_type": "Family", "slope_db_per_oct": "Slope"}
 
 Handler = Callable[[dict[str, Any]], ApplyResult | None]
 
@@ -102,6 +104,7 @@ class _Studio:
         self.plot: dict[str, bool] = {"phase": False, "group_delay": False, "each_filter": True, "on_device": True}
         self.device_key = DEMO_DEVICE_KEY
         self.live_errors = ""
+        self.notices: list[str] = []  # what the last request left out, for the page to say
 
     # State
 
@@ -245,7 +248,7 @@ class _Studio:
                 raise ValueError(f"the {kind} exists on outputs only")
             dynamics_key, dynamics = self.tuning.dynamics_edit(
                 self.token, channel, kind, {f: self._field_value(f, v) for f, v in values.items()})
-            self._stage_edit(dynamics_key, dynamics, list(values))
+            self._stage_edit(dynamics_key, dynamics, {f: self._field_value(f, v) for f, v in values.items()})
             return
         key: ControlKey | None = None
         block: Any = None
@@ -273,40 +276,56 @@ class _Studio:
                 f.name: getattr(edited, f.name) for f in fields(edited)
                 if getattr(edited, f.name) != getattr(current, f.name)})
         assert key is not None
-        typed = list(values)
-        stored: Any = controls(self.service.view(self.token).draft)[key]
-        if kind == "eq" and block.type != stored.type:
-            # A type change also resets the slope, and pins an allpass band's gain: the member gets those too.
-            typed += ["slope"] + (["gain_db"] if block.type in ALLPASS_TYPES else [])
-        self._stage_edit(key, block, typed)
+        self._stage_edit(key, block, {f: self._field_value(f, v) for f, v in values.items()})
 
-    def _stage_edit(self, key: ControlKey, after: object, typed: Sequence[str]) -> None:
+    def _stage_edit(self, key: ControlKey, after: object, typed: dict[str, Any]) -> None:
         """Stage an edit of one block (or delay) of a channel and, through links, the fields the user typed on every
-        tied member, applied to each member's own block. Values the edit moved on its own channel (a clamped
-        threshold) do not travel. An edit that changes nothing on the channel stages nothing there, so unticking a
-        disabled factory block (whose stored values the unit would refuse) is a no-op."""
+        tied member. Each member takes them through its own direct edit, on its own block, so what a field implies
+        there (the slope reset of a type change, an allpass band's pinned gain) comes from the member, never from this
+        channel; a member that cannot take a field is left out and named in the notice. Values the edit moved on its
+        own channel (a clamped threshold) do not travel. An edit that changes nothing on the channel stages nothing
+        there, so unticking a disabled factory block (whose stored values the unit would refuse) is a no-op."""
         draft = self.service.view(self.token).draft
-        before = controls(draft)[key]
-        updates = None if not is_dataclass(after) else {name: getattr(after, name) for name in typed}
-        edits: dict[ControlKey, object] = {} if same_value(before, after) else {key: after}
-        edits.update(links.expand_fields(self._notes().links, draft, key, after, updates, self._member_accepts))
+        edits: dict[ControlKey, object] = {} if same_value(controls(draft)[key], after) else {key: after}
+        for target in links.tied_targets(self._notes().links, draft, key):
+            block, skipped = self._member_block(target, key.block, after, typed)
+            self.notices += skipped
+            if block is not None and not same_value(controls(draft)[target], block):
+                edits[target] = block
         if edits:
             self.service.stage_many(self.token, edits)
 
-    def _member_accepts(self, key: ControlKey, updates: dict[str, Any]) -> dict[str, Any]:
-        """The fields of a linked edit the member's own block takes: one its direct edit would refuse (a gain on an
-        allpass band) is left out for that member."""
-        if key.block != "eq":
-            return updates
-        kept = {}
-        for name, value in updates.items():
-            if name in EQ_FIELDS:
-                try:
-                    self.tuning.eq_edit(self.token, key.output, key.channel, key.index, name, value)
-                except ValueError:
-                    continue
-            kept[name] = value
-        return kept
+    def _member_block(self, target: ControlKey, kind: str, after: object,
+                      typed: dict[str, Any]) -> tuple[object | None, list[str]]:
+        """The block a linked edit leaves on `target` (None for no change) and the notices of what it left out."""
+        label = channel_label(target.output, target.channel)
+        if not is_dataclass(after):
+            return after, []  # a delay
+        stored: Any = controls(self.service.view(self.token).draft)[target]
+        if kind in ("limiter", "compressor"):
+            block = replace(stored, **{name: getattr(after, name) for name in typed})
+            try:
+                normalize_control(target, block)
+            except ValueError:
+                return None, [f"Not changed on {label}: its {kind} has never been set up. Set it there first."]
+            return block, []
+        block = stored
+        skipped = []
+        for name, value in typed.items():
+            edited: Any
+            try:
+                if kind == "eq":
+                    _, edited = self.tuning.eq_edit(self.token, target.output, target.channel, target.index, name,
+                                                    value)
+                else:
+                    _, edited = self.tuning.crossover_edit(self.token, target.channel, kind, name, value)
+            except ValueError as error:
+                why = f"band {target.index + 1} is an all-pass" if "allpass" in str(error) else str(error)
+                skipped.append(f"{FIELD_WORDS.get(name, name)} not changed on {label}: {why}.")
+                continue
+            block = replace(block, **{f.name: getattr(edited, f.name) for f in fields(edited)
+                                      if getattr(edited, f.name) != getattr(stored, f.name)})
+        return block, skipped
 
     @staticmethod
     def _field_value(field: str, value: object) -> object:
@@ -524,8 +543,10 @@ def create_studio_app(service: DSPService | None = None, *, store: StudioStore |
 
     def run(handler: Handler, body: dict[str, Any]) -> dict[str, Any]:
         with studio.lock:
+            studio.notices = []
             result = handler(body)
-            return {**studio.state(), "result": None if result is None else _result_json(result)}
+            return {**studio.state(), "result": None if result is None else _result_json(result),
+                    "notice": " ".join(studio.notices) or None}
 
     async def read_body(request: Request) -> dict[str, Any]:
         raw = await request.body()

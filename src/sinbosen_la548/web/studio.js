@@ -209,6 +209,9 @@ async function request(path, body) {
   try {
     const data = await post(path, body);
     report(data.result);
+    // What a linked edit left out stands, in the hint line, until the status message changes or the next request.
+    if (data.notice) ui.notice = { text: data.notice, message: data.status.message, edit: true };
+    else if (ui.notice?.edit) ui.notice = null;
     show(number, data);
     return data;
   } finally {
