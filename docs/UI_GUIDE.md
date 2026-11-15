@@ -187,7 +187,9 @@ editing it moves each stored value that is outside its range to the nearest
 allowed one and shows those as unapplied. If the unit's stored bytes for a
 block cannot be preserved by a write (as with a factory limiter on some
 channels), its card is read-only and says so. A limiter edit follows a link
-group that ties **Limiter**; the compressor is never linked. Neither block is
+group that ties **Limiter**, but only the fields you edited reach the other members,
+whose own settings stay as they are; it is refused if a member's limiter is
+read-only. The compressor is never linked. Neither block is
 drawn on the plot, as their effect depends on the signal level, and neither
 changes the latency readout. The FIR stays a row below, showing On or Off (an
 input has only the FIR, and no limiter or compressor).

@@ -43,6 +43,13 @@ def expand(groups: Sequence[LinkGroup], settings: DeviceSettings,
     return result
 
 
+def tied_group(groups: Sequence[LinkGroup], key: ControlKey) -> LinkGroup | None:
+    """The group the key's channel is in when it ties the key's section, else None."""
+    section = section_of(key)
+    group = _group_of(groups, key.output, key.channel)
+    return group if section is not None and group is not None and section in group.sections else None
+
+
 def _tied_keys(group: LinkGroup, channel: int, available: dict[ControlKey, object]) -> list[ControlKey]:
     return [key for key in available
             if key.output == group.output and key.channel == channel and section_of(key) in group.sections]

@@ -165,7 +165,9 @@ def _dynamics_card(kind: str, block: LimiterSettings | CompressorSettings | None
         fields["detection_type"] = {"value": block.detection_type, "options": options,
                                     "pending": differs("detection_type")}
     return {"enabled": block.enabled, "enabled_pending": differs("enabled"), "pending": key in pending_keys,
-            "readonly_reason": write_refusal(block), "fields": fields}
+            "readonly_reason": None if write_refusal(block) is None else (
+                f"This {kind} holds data the app cannot write back safely, so it is shown read-only."),
+            "fields": fields}
 
 
 def _more_rows(ch: ChannelSettings) -> list[dict[str, str]]:

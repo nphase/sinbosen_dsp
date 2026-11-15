@@ -148,7 +148,8 @@ def test_a_factory_disabled_compressor_renders_with_its_stored_values(service: D
 
 def test_a_block_the_engine_refuses_to_write_is_read_only_with_the_reason(service: DSPService, token: str) -> None:
     limiter = state(service, token)["selected"]["limiter"]  # Out 3's factory limiter keeps a stored ratio
-    assert "unused limiter bytes" in limiter["readonly_reason"]
+    assert limiter["readonly_reason"] == ("This limiter holds data the app cannot write back safely, so it is "
+                                          "shown read-only.")
     assert limiter["fields"]["threshold_db"]["value"] == 340.0
 
 

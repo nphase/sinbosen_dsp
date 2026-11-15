@@ -12,8 +12,8 @@ import { createSavePopover } from "./save.js";
 
 const POLL_MS = 1000;
 const HINT = "Gain is sent when you press Enter; polarity and mute take effect immediately.";
-const HINT_DRAFT = "Filters and delay wait for Apply.";
-const HINT_LIVE = "Filters and delay are sent as you edit.";
+const HINT_DRAFT = "Filters, delay, limiter and compressor wait for Apply.";
+const HINT_LIVE = "Filters, delay, limiter and compressor are sent as you edit.";
 const HINT_ROUTING_DRAFT = "Routing waits for Apply.";
 const HINT_ROUTING_LIVE = "Routing is sent as you edit.";
 const TAB_KEY = "studio.tab";  // the chosen tab, kept in sessionStorage for reloads

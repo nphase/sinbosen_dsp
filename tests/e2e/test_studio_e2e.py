@@ -608,7 +608,7 @@ def test_typing_survives_polls(studio: Studio) -> None:
 
 def test_hint_says_filters_wait_for_apply_while_live_is_off(studio: Studio) -> None:
     hint = studio.page.locator("#hint")
-    assert "Filters and delay wait for Apply." in hint.inner_text()
+    assert "Filters, delay, limiter and compressor wait for Apply." in hint.inner_text()
     assert "Gain is sent when you press Enter; polarity and mute take effect immediately." in hint.inner_text()
 
 
@@ -1477,7 +1477,8 @@ def test_a_factory_disabled_compressor_shows_its_values_and_enabling_it_stages_v
 def test_a_block_the_engine_refuses_to_write_is_read_only_with_its_reason(studio: Studio) -> None:
     studio.select("Out 3")
     card = _dynamics_card(studio, "Limiter")
-    assert "unused limiter bytes" in card.locator(".card-note").inner_text()
+    assert card.locator(".card-note").inner_text() == ("This limiter holds data the app cannot write back safely, "
+                                                        "so it is shown read-only.")
     assert card.get_by_role("checkbox").is_disabled()
     assert studio.field("Limiter threshold").is_disabled()
     assert studio.field("Limiter detection").is_disabled()

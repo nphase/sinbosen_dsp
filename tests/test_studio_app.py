@@ -1179,3 +1179,78 @@ def test_apply_writes_the_dynamics_blocks_to_the_device_and_clears_them(store: S
     assert sent["limiter"][0] == sent["compressor"][0] == 0
     assert sent["limiter"][1]["threshold_db"] == -6.0
     assert sent["compressor"][1]["ratio"] == 4.0
+
+
+# A linked limiter edit changes only the fields the user changed, on each member's own block
+
+def _protected_out_2_linked_to_out_1(client: TestClient) -> None:
+    """Out 2's limiter is on at -10 dB, peak, and applied; then Out 1 and Out 2 are linked tying the limiter."""
+    post(client, "/api/edit", id="out:1", kind="limiter",
+         values={"enabled": True, "threshold_db": -10.0, "detection_type": 1})
+    post(client, "/api/apply")
+    _link_outputs(client, ["crossover", "eq", "delay", "limiter"])
+
+
+def _limiter_of(client: TestClient, channel_id: str) -> dict[str, Any]:
+    block = dynamics(post(client, "/api/select", id=channel_id), "limiter")
+    return {"enabled": block["enabled"], **{n: f["value"] for n, f in block["fields"].items()}}
+
+
+def test_a_linked_limiter_edit_leaves_the_members_other_fields_alone(client: TestClient) -> None:
+    _protected_out_2_linked_to_out_1(client)
+    state = post(client, "/api/edit", id="out:0", kind="limiter", field="release_time_ms", value=300.0)
+    assert state["status"]["pending_count"] == 2
+    assert _limiter_of(client, "out:1") == {"enabled": True, "threshold_db": -10.0, "start_time_ms": 0.3,
+                                            "release_time_ms": 300.0, "detection_type": 1}
+    out_1 = _limiter_of(client, "out:0")
+    assert (out_1["enabled"], out_1["threshold_db"], out_1["detection_type"]) == (False, 0.0, 0)
+
+
+def test_a_linked_limiter_enable_toggle_propagates_only_when_the_user_toggles_it(client: TestClient) -> None:
+    _protected_out_2_linked_to_out_1(client)
+    post(client, "/api/edit", id="out:0", kind="limiter", field="enabled", value=True)
+    assert _limiter_of(client, "out:1")["threshold_db"] == -10.0
+    assert _limiter_of(client, "out:1")["enabled"] is True
+    assert post(client, "/api/revert")["status"]["pending_count"] == 0
+    state = post(client, "/api/edit", id="out:1", kind="limiter", field="enabled", value=False)
+    assert state["status"]["pending_count"] == 1  # Out 1 is off already: nothing to change there, Out 2 goes off
+    assert _limiter_of(client, "out:1")["enabled"] is False
+    assert _limiter_of(client, "out:1")["threshold_db"] == -10.0
+
+
+def test_a_linked_multi_field_limiter_edit_carries_exactly_those_fields(client: TestClient) -> None:
+    _protected_out_2_linked_to_out_1(client)
+    post(client, "/api/edit", id="out:0", kind="limiter", values={"threshold_db": -3.0, "start_time_ms": 5.0})
+    assert _limiter_of(client, "out:1") == {"enabled": True, "threshold_db": -3.0, "start_time_ms": 5.0,
+                                            "release_time_ms": 50.0, "detection_type": 1}
+
+
+def test_a_linked_limiter_edit_is_refused_when_a_member_cannot_be_written(client: TestClient) -> None:
+    post(client, "/api/link", id="out:0", letter=None)
+    post(client, "/api/link", id="out:2", letter="A")
+    post(client, "/api/link/sections", letter="A", sections=["crossover", "eq", "delay", "limiter"])
+    post(client, "/api/revert")  # joining staged the group's crossover and EQ on Out 3
+    response = client.post("/api/edit", json={"id": "out:0", "kind": "limiter", "field": "threshold_db",
+                                              "value": -6.0})
+    assert response.status_code == 400
+    assert response.json()["error"] == ("Out 3's limiter cannot be edited from this app, so a linked limiter change "
+                                        "is refused. Untick Limiter on Link A to edit Out 1 alone.")
+    state = client.get("/api/state").json()
+    assert state["status"]["pending_count"] == 0
+    # Without the tie the same edit is fine, and Out 3's limiter is never written.
+    post(client, "/api/link/sections", letter="A", sections=["crossover", "eq", "delay"])
+    assert post(client, "/api/edit", id="out:0", kind="limiter", field="threshold_db",
+                value=-6.0)["status"]["pending_count"] == 1
+
+
+def test_apply_never_writes_a_read_only_limiter_through_a_link(store: StudioStore) -> None:
+    device = FakeDevice()
+    with connected(store, device) as client:
+        post(client, "/api/link", id="out:0", letter=None)
+        post(client, "/api/link", id="out:2", letter="A")
+        post(client, "/api/link/sections", letter="A", sections=["limiter"])
+        post(client, "/api/revert")
+        assert client.post("/api/edit", json={"id": "out:0", "kind": "limiter", "field": "threshold_db",
+                                              "value": -6.0}).status_code == 400
+        assert post(client, "/api/apply")["result"]["ok"] is True
+    device.client.set_limiter.assert_not_called()

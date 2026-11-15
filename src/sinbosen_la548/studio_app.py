@@ -24,7 +24,16 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import links, rew
-from .service import PROGRAM_SLOTS, ApplyResult, ControlKey, DSPService, controls, demo_settings, same_value
+from .service import (
+    PROGRAM_SLOTS,
+    ApplyResult,
+    ControlKey,
+    DSPService,
+    controls,
+    demo_settings,
+    same_value,
+    write_refusal,
+)
 from .settings import CrossoverSettings, DeviceSettings, EQBandSettings
 from .studio_store import SECTIONS, DeviceNotes, LinkGroup, StudioStore, default_path
 from .studio_view import build_state, channel_label
@@ -264,16 +273,36 @@ class _Studio:
         self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: block}))
 
     def _edit_dynamics(self, output: bool, channel: int, kind: str, values: dict[str, Any]) -> None:
-        """Stage a limiter or compressor edit. Only the limiter is tied by links; an edit that changes nothing stages
-        nothing, so unticking a disabled factory block (whose stored values the unit would refuse) is a no-op."""
+        """Stage a limiter or compressor edit. Only the limiter is tied by links, and then only the fields of this
+        edit reach a member, applied to the member's own block: a member's other fields (its enable flag, its
+        threshold) are never rewritten by an edit of this one. An edit that changes nothing stages nothing, so
+        unticking a disabled factory block (whose stored values the unit would refuse) is a no-op."""
         if not output:
             raise ValueError(f"the {kind} exists on outputs only")
-        key, block = self.tuning.dynamics_edit(self.token, channel, kind,
-                                               {f: self._field_value(f, v) for f, v in values.items()})
+        typed = {f: self._field_value(f, v) for f, v in values.items()}
+        key, block = self.tuning.dynamics_edit(self.token, channel, kind, typed)
         draft = self.service.view(self.token).draft
-        if same_value(block, controls(draft)[key]):
-            return
-        self.service.stage_many(self.token, links.expand(self._notes().links, draft, {key: block}))
+        edits: dict[ControlKey, object] = {}
+        if not same_value(block, controls(draft)[key]):
+            edits[key] = block
+        group = links.tied_group(self._notes().links, key)
+        if group is not None:
+            self._stage_members(group, key, kind, typed, draft, edits)
+        if edits:
+            self.service.stage_many(self.token, edits)
+
+    def _stage_members(self, group: LinkGroup, key: ControlKey, kind: str, typed: dict[str, Any],
+                       draft: DeviceSettings, edits: dict[ControlKey, object]) -> None:
+        """Add to `edits` the typed fields on each other member's own block; refuse if a member's cannot be written."""
+        channel = key.channel
+        for member in (m for m in group.members if m != channel):
+            if write_refusal(controls(draft)[replace(key, channel=member)]) is not None:
+                raise ValueError(f"{channel_label(True, member)}'s limiter cannot be edited from this app, so a "
+                                 f"linked limiter change is refused. Untick Limiter on Link {group.letter} to edit "
+                                 f"{channel_label(True, channel)} alone.")
+            member_key, member_block = self.tuning.dynamics_edit(self.token, member, kind, typed)
+            if not same_value(member_block, controls(draft)[member_key]):
+                edits[member_key] = member_block
 
     @staticmethod
     def _field_value(field: str, value: object) -> object:
